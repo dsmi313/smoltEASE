@@ -5,7 +5,7 @@ Version: 0.1.0
 Authors@R: c(
     person("David", "Smith", email = "david.smith@idfg.idaho.gov", role = c("aut", "cre")),
     person("Thomas", "Delomas", role = "ctb")
-)
+    )
 Maintainer: David Smith <david.smith@idfg.idaho.gov>
 Description: Tools for estimating juvenile salmonid escapement at Lower Granite Dam
     using extensions of the SCRAPI framework. The package implements SCRAPI2,
