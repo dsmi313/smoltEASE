@@ -1,0 +1,12 @@
+---
+title: "Introduction to smoltEASE"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: |-
+  %\VignetteIndexEntry{Introduction to smoltEASE}
+  %\VignetteEncoding{UTF-8}
+---
+
+# Introduction
+This is the introductory vignette for the smoltEASE package.
