@@ -36,8 +36,7 @@
 #'   \code{stratum}, \code{stratum_idx}, \code{n_GRS_pool}, \code{n_UND},
 #'   \code{n_pool}, \code{n_GRJ_obs}, \code{n_GRS_obs}, \code{spill_val}.
 #'
-#' @importFrom dplyr filter arrange group_by slice ungroup transmute left_join
-#'   mutate case_when full_join summarise distinct count rename across
+#' #' @importFrom dplyr filter arrange group_by slice ungroup transmute left_join mutate case_when full_join summarise distinct count rename across
 #' @importFrom tidyr pivot_wider replace_na
 #' @export
 prep_ge_data <- function(dat_up,
