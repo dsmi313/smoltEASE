@@ -1,8 +1,20 @@
 Package: smoltEASE
 Type: Package
-Title: A short title
+Title: Applying EASE uncertainty within SCRAPI smolt estimates
 Version: 0.1.0
-Author: Your Name
-Maintainer: Your Name <you@example.com>
-Description: A brief description of the package.
+Authors@R: c(
+    person("David", "Smith", email = "david.smith@idfg.idaho.gov", role = c("aut", "cre")),
+    person("Thomas", "Delomas", role = "ctb")
+)
+Maintainer: David Smith <david.smith@idfg.idaho.gov>
+Description: Description: Tools for estimating juvenile salmonid escapement at Lower Granite Dam
+    using extensions of the SCRAPI framework. The package implements SCRAPI2,
+    which propagates uncertainty in guidance efficiency (GE) and genetic stock
+    identification (GSI) through bootstrap estimation. It includes utilities
+    for preparing PIT tag data, fitting Bayesian hierarchical models for GE,
+    generating posterior draws, and integrating these into escapement estimates.
+    Designed to align with EASE-style uncertainty propagation used in adult
+    escapement analyses.
 License: GPL-3
+URL: https://github.com/dsmi313/smoltEASE
+BugReports: https://github.com/dsmi313/smoltEASE/issues
