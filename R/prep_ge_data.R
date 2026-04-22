@@ -1,4 +1,6 @@
-#' @importFrom dplyr
+# This is an R script for preparing geospatial data
 
-# Other content of the file
-...
+#' @importFrom dplyr filter arrange group_by slice ungroup transmute left_join mutate case_when full_join summarise distinct count rename across
+# Additional comments can go here...
+
+# Function definitions and other content follow...
