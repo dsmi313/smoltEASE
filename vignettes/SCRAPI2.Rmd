@@ -433,16 +433,30 @@ result_model <- SCRAPI2(
 ## Path D — `SCRAPI2` with Bayesian GE + simulated GSI draws
 
 ```{r path-d-model-ge-gsi}
+# Build draws on the same fish subset SCRAPI2 uses for Primary composition:
+# wild fish with non-missing observed GenStock.
+gsi_source <- STHD.trap %>%
+  filter(Rear == "W", GenStock != "NA") %>%
+  distinct(MasterID, GenStock)
+
 # Placeholder GSI posterior draws in SCRAPI2 format.
 # method = "population" injects assignment uncertainty as a sensitivity run.
 gsi_draws_sthd <- sim_gsi_draws(
-  smoltData = STHD.trap,
+  smoltData = gsi_source,
   Primary   = "GenStock",
   fishID    = "MasterID",
   B         = B,
   method    = "population",
   seed      = 123
 )
+
+# Guardrails: IDs must match the SCRAPI2 analysis subset.
+analysis_ids <- STHD.trap %>%
+  filter(Rear == "W", GenStock != "NA") %>%
+  distinct(MasterID) %>%
+  pull(MasterID)
+stopifnot(all(analysis_ids %in% gsi_draws_sthd$MasterID))
+stopifnot(!anyNA(gsi_draws_sthd[, -1]))
 
 result_model_gsi <- SCRAPI2(
   smoltData   = STHD.trap,
