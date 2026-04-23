@@ -28,7 +28,6 @@ knitr::opts_chunk$set(
 > If a second header or console log text (e.g., `processing file:` / `pandoc`) is pasted into
 > the document body, rendering will fail with a YAML parse error.
 
----
 
 # Background
 
@@ -80,7 +79,6 @@ used independently or together:
 `geDraws = NULL` and a fixed `GuidanceEfficiency` column is supplied), `SCRAPI2`
 produces results numerically identical to `SCOBI::SCRAPI`.
 
----
 
 # Install and load
 
@@ -96,7 +94,6 @@ library(readxl)
 library(coda)      # gelman.diag for MCMC convergence
 ```
 
----
 
 # Data inputs
 
@@ -156,7 +153,6 @@ ge_sthd <- read_excel("GE 2025.xlsx",
 knitr::kable(head(ge_sthd), caption = "NOAA fixed GE table (first 6 rows)")
 ```
 
----
 
 # The Bayesian GE model
 
@@ -337,7 +333,6 @@ knitr::kable(
 )
 ```
 
----
 
 # Four-way comparison
 
@@ -470,7 +465,6 @@ result_model_gsi <- SCRAPI2(
 )
 ```
 
----
 
 # Results
 
@@ -593,7 +587,6 @@ ggplot(abund_compare, aes(x = Workflow, y = Estimate, fill = Workflow)) +
   theme(legend.position = "none")
 ```
 
----
 
 # Control check (exact-GE draws)
 
@@ -633,7 +626,6 @@ cat(sprintf("Difference        : %.2f%%\n",
 stopifnot(abs(est_fixed - est_exact) / est_fixed < 0.01)
 ```
 
----
 
 # Reviewer checklist
 
@@ -645,4 +637,3 @@ stopifnot(abs(est_fixed - est_exact) / est_fixed < 0.01)
 | Path C CI half-width vs Path B | Wider or equal — never narrower |
 | Exact-GE control check | < 1% difference in WildSmolts estimate |
 
----
