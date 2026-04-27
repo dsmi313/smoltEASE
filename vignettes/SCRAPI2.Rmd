@@ -24,7 +24,10 @@ knitr::opts_chunk$set(
 )
 ```
 
----
+> **R Markdown note:** keep exactly one YAML header (`---` ... `---`) at the top of the file.
+> If a second header or console log text (e.g., `processing file:` / `pandoc`) is pasted into
+> the document body, rendering will fail with a YAML parse error.
+
 
 # Background
 
@@ -76,7 +79,6 @@ used independently or together:
 `geDraws = NULL` and a fixed `GuidanceEfficiency` column is supplied), `SCRAPI2`
 produces results numerically identical to `SCOBI::SCRAPI`.
 
----
 
 # Install and load
 
@@ -92,7 +94,6 @@ library(readxl)
 library(coda)      # gelman.diag for MCMC convergence
 ```
 
----
 
 # Data inputs
 
@@ -152,7 +153,6 @@ ge_sthd <- read_excel("GE 2025.xlsx",
 knitr::kable(head(ge_sthd), caption = "NOAA fixed GE table (first 6 rows)")
 ```
 
----
 
 # The Bayesian GE model
 
@@ -333,22 +333,23 @@ knitr::kable(
 )
 ```
 
----
 
-# Three-way comparison
+# Four-way comparison
 
-We run three estimation workflows on the same MY2025 steelhead data and compare
-the resulting wild smolt estimates and confidence intervals.
+We run four estimation workflows on the same MY2025 steelhead data and compare
+wild smolt estimates and confidence intervals.
 
-| Workflow | GE source | Tool |
-|---|---|---|
-| **A — Legacy** | NOAA fixed table | `SCOBI::SCRAPI` |
-| **B — SCRAPI2 fixed GE** | Same NOAA table, no uncertainty | `SCRAPI2` |
-| **C — SCRAPI2 model GE** | Bayesian posterior draws | `SCRAPI2` |
+| Workflow | GE source | GSI source | Tool |
+|---|---|---|---|
+| **A — Legacy** | NOAA fixed table | Observed `GenStock` labels | `SCOBI::SCRAPI` |
+| **B — SCRAPI2 fixed GE** | Same NOAA table, no GE uncertainty | Observed `GenStock` labels | `SCRAPI2` |
+| **C — SCRAPI2 model GE** | Bayesian posterior draws (`geDraws`) | Observed `GenStock` labels | `SCRAPI2` |
+| **D — SCRAPI2 model GE + GSI draws** | Bayesian posterior draws (`geDraws`) | Simulated posterior-like draws (`gsiDraws`) | `SCRAPI2` |
 
-Paths A and B should produce nearly identical point estimates — this validates
-that `SCRAPI2` has not changed the underlying SCRAPI estimation logic. Path C
-should have wider CIs because GE uncertainty is now properly propagated.
+Paths A and B should be nearly identical (validation of SCRAPI2 against legacy
+SCRAPI). Path C shows what GE uncertainty alone adds. Path D adds GSI assignment
+uncertainty (via `sim_gsi_draws()`) on top of GE uncertainty, so CIs should be
+as wide or wider than Path C.
 
 ## Helper: add Collapse column for legacy SCOBI::SCRAPI
 
@@ -424,7 +425,46 @@ result_model <- SCRAPI2(
 )
 ```
 
----
+## Path D — `SCRAPI2` with Bayesian GE + simulated GSI draws
+
+```{r path-d-model-ge-gsi}
+# Build draws on the same fish subset SCRAPI2 uses for Primary composition:
+# wild fish with non-missing observed GenStock.
+gsi_source <- STHD.trap %>%
+  filter(Rear == "W", GenStock != "NA") %>%
+  distinct(MasterID, GenStock)
+
+# Placeholder GSI posterior draws in SCRAPI2 format.
+# method = "population" injects assignment uncertainty as a sensitivity run.
+gsi_draws_sthd <- sim_gsi_draws(
+  smoltData = gsi_source,
+  Primary   = "GenStock",
+  fishID    = "MasterID",
+  B         = B,
+  method    = "population",
+  seed      = 123
+)
+
+# Guardrails: IDs must match the SCRAPI2 analysis subset.
+analysis_ids <- STHD.trap %>%
+  filter(Rear == "W", GenStock != "NA") %>%
+  distinct(MasterID) %>%
+  pull(MasterID)
+stopifnot(all(analysis_ids %in% gsi_draws_sthd$MasterID))
+stopifnot(!anyNA(gsi_draws_sthd[, -1]))
+
+result_model_gsi <- SCRAPI2(
+  smoltData   = STHD.trap,
+  passageData = sthd_fpc,
+  strata      = sthd_strata,
+  geDraws     = ge_draws_sthd,
+  gsiDraws    = gsi_draws_sthd,
+  Primary     = "GenStock",
+  dateFormat  = "%Y-%m-%d",
+  B           = B
+)
+```
+
 
 # Results
 
@@ -438,17 +478,18 @@ ci_df <- function(mat, label) {
     mutate(Workflow = label)
 }
 
-# Paths B and C return result$CI (matrix with Estimate / LCI / UCI / P1)
+# Paths B/C/D return result$CI (matrix with Estimate / LCI / UCI / P1)
 # Path A is read from the CSV SCOBI wrote
 tbl_legacy <- legacy_ci %>%
   rownames_to_column("Stock") %>%
   mutate(Workflow = "A: SCOBI legacy") %>%
   rename(Estimate = Estimate, LCI = LCI, UCI = UCI)
 
-tbl_fixed  <- ci_df(result_fixed$CI, "B: SCRAPI2 fixed GE")
-tbl_model  <- ci_df(result_model$CI, "C: SCRAPI2 model GE")
+tbl_fixed     <- ci_df(result_fixed$CI, "B: SCRAPI2 fixed GE")
+tbl_model_ge  <- ci_df(result_model$CI, "C: SCRAPI2 model GE")
+tbl_model_both <- ci_df(result_model_gsi$CI, "D: SCRAPI2 model GE + GSI draws")
 
-results_all <- bind_rows(tbl_legacy, tbl_fixed, tbl_model)
+results_all <- bind_rows(tbl_legacy, tbl_fixed, tbl_model_ge, tbl_model_both)
 
 # Wild smolt total row only
 results_all %>%
@@ -456,7 +497,7 @@ results_all %>%
   mutate(`CI half-width (%)` = round((UCI - LCI) / (2 * Estimate) * 100, 1)) %>%
   select(Workflow, Estimate, LCI, UCI, `CI half-width (%)`) %>%
   knitr::kable(
-    caption = "Wild steelhead smolt estimates — three workflows",
+    caption = "Wild steelhead smolt estimates — four workflows",
     format.args = list(big.mark = ",")
   )
 ```
@@ -464,17 +505,20 @@ results_all %>%
 ## Forest plot — all stocks
 
 ```{r forest-plot, fig.width=10, fig.height=5}
+workflow_cols <- c(
+  "A: SCOBI legacy"                   = "#555555",
+  "B: SCRAPI2 fixed GE"               = "#2166ac",
+  "C: SCRAPI2 model GE"               = "#d73027",
+  "D: SCRAPI2 model GE + GSI draws"   = "#762a83"
+)
+
 results_all %>%
   filter(Stock != "WildSmolts") %>%
   mutate(Stock = factor(Stock)) %>%
   ggplot(aes(x = Estimate, xmin = LCI, xmax = UCI,
              y = Stock, colour = Workflow)) +
   geom_pointrange(position = position_dodge(width = 0.5), size = 0.6) +
-  scale_colour_manual(values = c(
-    "A: SCOBI legacy"      = "#555555",
-    "B: SCRAPI2 fixed GE"  = "#2166ac",
-    "C: SCRAPI2 model GE"  = "#d73027"
-  )) +
+  scale_colour_manual(values = workflow_cols) +
   scale_x_continuous(labels = scales::comma) +
   labs(title  = "Wild steelhead smolts by genetic stock — MY2025",
        x      = "Estimated abundance",
@@ -488,29 +532,61 @@ results_all %>%
 
 ## CI width comparison — WildSmolts
 
-```{r ci-width-plot, fig.width=6, fig.height=4}
+```{r ci-width-plot, fig.width=7, fig.height=4}
 results_all %>%
   filter(Stock == "WildSmolts") %>%
   mutate(
-    half_width = (UCI - LCI) / 2,
-    Workflow   = fct_inorder(Workflow)
+    Workflow = factor(
+      Workflow,
+      levels = c(
+        "A: SCOBI legacy",
+        "B: SCRAPI2 fixed GE",
+        "C: SCRAPI2 model GE",
+        "D: SCRAPI2 model GE + GSI draws"
+      )
+    ),
+    half_width = (UCI - LCI) / 2
   ) %>%
   ggplot(aes(x = Workflow, y = half_width, fill = Workflow)) +
-  geom_col(width = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values = c(
-    "A: SCOBI legacy"      = "#555555",
-    "B: SCRAPI2 fixed GE"  = "#2166ac",
-    "C: SCRAPI2 model GE"  = "#d73027"
-  )) +
+  geom_col(width = 0.55, show.legend = FALSE) +
+  scale_fill_manual(values = workflow_cols) +
   labs(title = "90% CI half-width — WildSmolts",
        x = NULL, y = "Half-width (fish)") +
   theme_minimal(base_size = 13)
 ```
 
-The model-GE CI (Path C) should be wider than the fixed-GE CI (Paths A/B).
-The difference represents the additional uncertainty from not knowing GE exactly.
+Path C minus Path B isolates the effect of GE uncertainty. Path D minus Path C
+shows the additional interval inflation from GSI assignment uncertainty.
 
----
+```{r abundance-vs-spill, fig.width=7, fig.height=5}
+# Compare WildSmolts abundance and uncertainty across workflows
+abund_compare <- results_all %>%
+  filter(Stock == "WildSmolts") %>%
+  mutate(
+    Workflow = factor(
+      Workflow,
+      levels = c(
+        "A: SCOBI legacy",
+        "B: SCRAPI2 fixed GE",
+        "C: SCRAPI2 model GE",
+        "D: SCRAPI2 model GE + GSI draws"
+      )
+    )
+  )
+
+ggplot(abund_compare, aes(x = Workflow, y = Estimate, fill = Workflow)) +
+  geom_col(width = 0.6) +
+  geom_errorbar(aes(ymin = LCI, ymax = UCI), width = 0.2) +
+  scale_fill_manual(values = workflow_cols) +
+  labs(
+    title = "Effect of GE and GSI uncertainty on smolt abundance estimates",
+    y = "Estimated abundance",
+    x = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+```
+
 
 # Control check (exact-GE draws)
 
@@ -550,7 +626,6 @@ cat(sprintf("Difference        : %.2f%%\n",
 stopifnot(abs(est_fixed - est_exact) / est_fixed < 0.01)
 ```
 
----
 
 # Reviewer checklist
 
@@ -562,4 +637,3 @@ stopifnot(abs(est_fixed - est_exact) / est_fixed < 0.01)
 | Path C CI half-width vs Path B | Wider or equal — never narrower |
 | Exact-GE control check | < 1% difference in WildSmolts estimate |
 
----
