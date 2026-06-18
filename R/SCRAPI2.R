@@ -370,18 +370,16 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   set          <- sort(unique(all_valid))
   ndates       <- length(set)
 
-  tabl      <- table(AllPrimary[, FISHdate], AllPrimary[, FISHpndx])
-  nPrime    <- apply(tabl, 1, sum)
-  nPrime_d  <- as.Date(names(nPrime), format = dateFormat)
-
+  # Per-date primary sampling rate. Use the Date-native count of primary fish on
+  # each date (length(fidx)); a prior table()/as.Date(names(...)) re-parse broke
+  # once date columns became Date class, leaving SR all-zero (see git 6b1e1d8).
   AllPrimary$SR <- numeric(nFISH)
   for(nn in seq_len(ndates)) {
     set_d <- set[nn]
     ptmp  <- pass[which(!is.na(pass_dates_d) & pass_dates_d == set_d), , drop = FALSE]
-    pc    <- nPrime[which(!is.na(nPrime_d) & nPrime_d == set_d)]
     fidx  <- which(!is.na(allp_dates_d) & allp_dates_d == set_d)
-    if (nrow(ptmp) > 0 && length(fidx) > 0 && length(pc) > 0)
-      AllPrimary$SR[fidx] <- ptmp$true[1] * pc[1] / ptmp[1, PASScounts]
+    if (nrow(ptmp) > 0 && length(fidx) > 0)
+      AllPrimary$SR[fidx] <- ptmp$true[1] * length(fidx) / ptmp[1, PASScounts]
   }
 
   # ---- strata / group metadata -------------------------------------------
@@ -413,6 +411,34 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
                  SGrp  = ap[, FISHsndx], SR = ap$SR)
     else
       data.frame(Strat = ap$Collaps, PGrp = ap[, FISHpndx], SR = ap$SR)
+  }
+
+  # ---- helper: safe weighted-bootstrap probabilities ---------------------
+  # Replaces non-finite or non-positive weights with the mean of the valid
+  # weights so a few bad values don't break sample.int(). When a whole stratum
+  # has no usable weights, returns NULL so sampling falls back to uniform
+  # (equal) probabilities instead of erroring with "NA in probability vector".
+  bootProb <- function(w) {
+    ok <- is.finite(w) & w > 0
+    if(!any(ok)) return(NULL)
+    w[!ok] <- mean(w[ok])
+    w
+  }
+
+  # ---- pre-flight: surface strata with no usable bootstrap weights -------
+  # The weights are fixed across bootstrap iterations, so check once here and
+  # warn rather than silently switching a stratum to uniform sampling.
+  for(h in strats) {
+    rw <- RearData$True[RearData$Stratum == h]
+    if(length(rw) > 0 && !any(is.finite(rw) & rw > 0))
+      warning("Stratum ", h, ": no positive, finite rearing weights ('True'); ",
+              "rearing bootstrap for this stratum will use uniform sampling.",
+              call. = FALSE)
+    sw <- AllPrimary$SR[AllPrimary$Collaps == h]
+    if(length(sw) > 0 && !any(is.finite(sw) & sw > 0))
+      warning("Stratum ", h, ": no positive, finite composition weights ('SR'); ",
+              "composition bootstrap for this stratum will use uniform sampling.",
+              call. = FALSE)
   }
 
   # ---- point estimate ----------------------------------------------------
@@ -476,7 +502,8 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
       WHstar <- NULL
       for(h in strats) {
         jw  <- RearData[which(RearData$Stratum == h), ]
-        idx <- sample.int(nrow(jw), replace = TRUE, prob = jw$True)
+        if(nrow(jw) == 0) next
+        idx <- sample.int(nrow(jw), replace = TRUE, prob = bootProb(jw$True))
         WHstar <- rbind(WHstar, jw[idx, ])
       }
       RearStar <- WHstar
@@ -484,10 +511,9 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
       # weighted bootstrap of fish by stratum
       ap_boot <- NULL
       for(h in strats) {
-        jw     <- AllPrimary[which(AllPrimary$Collaps == h), ]
-        sr     <- jw$SR
-        sr[!is.finite(sr) | sr <= 0] <- mean(sr[is.finite(sr) & sr > 0], na.rm = TRUE)
-        idx <- sample.int(nrow(jw), replace = TRUE, prob = sr)
+        jw  <- AllPrimary[which(AllPrimary$Collaps == h), ]
+        if(nrow(jw) == 0) next
+        idx <- sample.int(nrow(jw), replace = TRUE, prob = bootProb(jw$SR))
         ap_boot <- rbind(ap_boot, jw[idx, ])
       }
       ap_b <- ap_boot
