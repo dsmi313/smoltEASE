@@ -370,18 +370,16 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   set          <- sort(unique(all_valid))
   ndates       <- length(set)
 
-  tabl      <- table(AllPrimary[, FISHdate], AllPrimary[, FISHpndx])
-  nPrime    <- apply(tabl, 1, sum)
-  nPrime_d  <- as.Date(names(nPrime), format = dateFormat)
-
+  # Per-date primary sampling rate. Use the Date-native count of primary fish on
+  # each date (length(fidx)); a prior table()/as.Date(names(...)) re-parse broke
+  # once date columns became Date class, leaving SR all-zero (see git 6b1e1d8).
   AllPrimary$SR <- numeric(nFISH)
   for(nn in seq_len(ndates)) {
     set_d <- set[nn]
     ptmp  <- pass[which(!is.na(pass_dates_d) & pass_dates_d == set_d), , drop = FALSE]
-    pc    <- nPrime[which(!is.na(nPrime_d) & nPrime_d == set_d)]
     fidx  <- which(!is.na(allp_dates_d) & allp_dates_d == set_d)
-    if (nrow(ptmp) > 0 && length(fidx) > 0 && length(pc) > 0)
-      AllPrimary$SR[fidx] <- ptmp$true[1] * pc[1] / ptmp[1, PASScounts]
+    if (nrow(ptmp) > 0 && length(fidx) > 0)
+      AllPrimary$SR[fidx] <- ptmp$true[1] * length(fidx) / ptmp[1, PASScounts]
   }
 
   # ---- strata / group metadata -------------------------------------------
