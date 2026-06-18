@@ -277,7 +277,20 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   temp <- t(Cpattern); rownames(temp) <- c("Week","Strata")
   colnames(temp) <- rep("", ncol(temp)); print(temp)
 
-  pass$true      <- pass[, PASSrate] * pass[, PASSguideff]
+  # When geDraws is supplied, use posterior mean GE for the point estimate
+  # rather than the fixed GuidanceEfficiency column, so the point estimate
+  # and bootstrap CIs both reflect the Bayesian GE.
+  if (!is.null(geDraws)) {
+    ge_date_idx_pe <- match(as.Date(pass[, dat], format = dateFormat),
+                            as.Date(geDraws$SampleEndDate))
+    ge_means_pe    <- rowMeans(as.matrix(geDraws[, -1, drop = FALSE]), na.rm = TRUE)
+    ge_pe          <- ifelse(is.na(ge_date_idx_pe),
+                             mean(ge_means_pe, na.rm = TRUE),
+                             ge_means_pe[ge_date_idx_pe])
+    pass$true <- pass[, PASSrate] * ge_pe
+  } else {
+    pass$true <- pass[, PASSrate] * pass[, PASSguideff]
+  }
   pass$estimated <- pass[, PASScounts] / pass$true
 
   passdata <- data.frame(Stratum = pass[, PASScollaps],
