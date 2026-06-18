@@ -600,7 +600,7 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   if(!is.na(Secondary)) {
     sAbunTable <- cbind(sAbunTable, apply(sAbunTable, 1, sum))
     sAbunTable <- rbind(sAbunTable, apply(sAbunTable, 2, sum))
-    rownames(sAbunTable) <- c(levels(Pgrps), "sTotals")
+    rownames(sAbunTable) <- c(as.character(Pgrps), "sTotals")
     colnames(sAbunTable) <- c(Sgrps, "pTotals")
     write.table(round(sAbunTable, 0), file = paste0(Run, "PxS.csv"),
                 col.names = NA, append = FALSE, sep = ",")
