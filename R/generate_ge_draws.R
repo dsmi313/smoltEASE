@@ -37,7 +37,10 @@ generate_ge_draws <- function(ge_fit,
   if (all(c("Week", "Collapse") %in% names(strat_assign)) &&
       !("date" %in% names(strat_assign))) {
 
-    all_dates <- sort(unique(as.Date(pass_dates)))
+    all_dates <- sort(unique(tryCatch(
+      as.Date(pass_dates),
+      error = function(e) as.Date(pass_dates, tryFormats = c("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"))
+    )))
     wk_num    <- as.integer(format(all_dates, "%V"))
 
     week_to_strat <- strat_assign
@@ -100,7 +103,10 @@ generate_ge_draws <- function(ge_fit,
 
   # --- Map strata to daily passageData rows ---
   # Explicit Date coercion prevents silent NA from character format mismatches
-  pass_dates_d  <- as.Date(pass_dates)
+  pass_dates_d  <- tryCatch(
+    as.Date(pass_dates),
+    error = function(e) as.Date(pass_dates, tryFormats = c("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"))
+  )
   strat_dates_d <- as.Date(strat_assign$date)
   day_match     <- match(pass_dates_d, strat_dates_d)
   strat_idx_v   <- strat_assign$stratum_idx[day_match]   # NA = unmatched date
