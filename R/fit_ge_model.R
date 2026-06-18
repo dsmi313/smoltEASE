@@ -1,77 +1,159 @@
-#' @title Fit Bayesian hierarchical model for spillway detection probability
+#' @title Fit Bayesian multistate model for guidance efficiency at LGR
 #'
-#' @description Estimates spillway detection probability (psi) per trap stratum
-#'   using a hierarchical JAGS model. The logit of psi is modelled as a linear
-#'   function of spill (regression covariate) plus stratum-level random effects
-#'   that share a common precision. Only strata with at least one psi-pool
-#'   observation are included in the binomial likelihood; zero-data strata receive
-#'   regression-predicted psi in \code{\link{generate_ge_draws}}.
+#' @description Estimates guidance efficiency (psi) per trap stratum using a
+#'   multistate mark-recapture model. Detection histories from GRJ (bypass),
+#'   GRS (spillway bay 1), and GOJ (Little Goose bypass) are used to jointly
+#'   estimate psi (GE), p (GRS detection probability), and phi (GOJ detection
+#'   probability). This replaces the original binomial psi-pool likelihood with
+#'   a more complete observation model that accounts for fish missed by both
+#'   LGR arrays but detected downstream.
 #'
-#' @param ge_data data frame returned by \code{\link{prep_ge_data}}.
+#'   The logit of each parameter is modelled as a linear function of spill
+#'   (LGR spill for psi and p; LGS spill for phi) plus stratum-level process
+#'   error. Informative priors on phi are derived from McCann et al. (2023)
+#'   Table 8.3 LGS steelhead coefficients.
+#'
+#'   GE is estimated directly as psi. \code{\link{generate_ge_draws}} then
+#'   uses the psi posterior draws and raw GRJ/GRS counts to compute per-draw
+#'   GE values for SCRAPI2.
+#'
+#'   Weekly counts are capped at \code{max_n} per stratum before fitting to
+#'   prevent the multinomial likelihood from collapsing the posterior in
+#'   data-rich strata (following data-thinning approach of McCann et al. 2023).
+#'
+#' @param ge_data data frame returned by \code{\link{prep_ge_data}}. Must
+#'   contain columns \code{stratum_idx}, \code{n_GRJ_obs}, \code{n_GRS_obs},
+#'   \code{n_pool}, \code{spill_val}, and \code{lgs_spill_val}.
+#' @param max_n integer. Maximum effective sample size per stratum for the
+#'   multinomial likelihood. Counts are scaled proportionally if N_seen > max_n.
+#'   Default 300.
 #' @param n_iter number of MCMC iterations after burn-in per chain. Default 10000.
-#' @param n_burnin number of adaptation/burn-in iterations. Default 3000.
+#' @param n_burnin number of adaptation/burn-in iterations. Default 5000.
 #' @param n_chains number of MCMC chains. Default 3.
-#' @param n_thin thinning interval. Default 2.
-#' @param seed random seed passed to \code{set.seed()} for reproducibility. Default 42.
+#' @param n_thin thinning interval. Default 5.
+#' @param seed random seed. Default 42.
 #'
 #' @return A list with elements:
-#'   \item{samples}{an \code{mcmc.list} object with posterior draws of
-#'     \code{psi[1..k]}, \code{alpha}, \code{beta}, \code{sigma_psi}}
-#'   \item{ge_data}{the input \code{ge_data} (passed through for downstream use)}
-#'   \item{obs_strata}{the subset of \code{ge_data} with \code{n_pool > 0}}
+#'   \item{samples}{an \code{mcmc.list} with posterior draws of
+#'     \code{psi[1..S]}, \code{p[1..S]}, \code{phi[1..S]},
+#'     \code{alpha} (= alpha_psi), \code{beta} (= beta_psi),
+#'     \code{sigma_psi}, \code{alpha_p}, \code{beta_p}, \code{sigma_p},
+#'     \code{alpha_phi}, \code{beta_phi}, \code{sigma_phi}}
+#'   \item{ge_data}{the input \code{ge_data} (passed through)}
+#'   \item{obs_strata}{subset of \code{ge_data} with \code{n_pool > 0}}
+#'   \item{spill_mean}{mean of \code{spill_val} used for standardisation}
+#'   \item{spill_sd}{SD of \code{spill_val} used for standardisation}
 #'
-#' @details Requires JAGS to be installed on the system. Install with
-#'   \code{sudo apt install jags} (Linux) or \code{brew install jags} (macOS),
-#'   then \code{install.packages("rjags")} in R.
-#'
-#'   Check convergence with \code{coda::gelman.diag(ge_fit$samples)} —
-#'   R-hat values should be below 1.1 for all parameters.
+#' @details The five detection history cell probabilities (conditioned on
+#'   being observed at least once) are:
+#'   \enumerate{
+#'     \item (GRJ, no GOJ): psi * (1 - phi)
+#'     \item (GRJ, GOJ):    psi * phi
+#'     \item (GRS, no GOJ): (1 - psi) * p * (1 - phi)
+#'     \item (GRS, GOJ):    (1 - psi) * p * phi
+#'     \item (no LGR, GOJ): (1 - psi) * (1 - p) * phi
+#'   }
 #'
 #' @export
 fit_ge_model <- function(ge_data,
+                         max_n    = 300,
                          n_iter   = 10000,
-                         n_burnin = 3000,
+                         n_burnin = 5000,
                          n_chains = 3,
-                         n_thin   = 2,
+                         n_thin   = 5,
                          seed     = 42) {
 
   if (!requireNamespace("rjags", quietly = TRUE))
     stop("Package 'rjags' is required. Install with install.packages('rjags') ",
          "and ensure JAGS is installed on your system (apt/brew install jags).")
 
+  required_cols <- c("stratum_idx", "n_GRJ_obs", "n_GRS_obs", "n_pool",
+                     "spill_val", "lgs_spill_val",
+                     "n_h1", "n_h2", "n_h3", "n_h4", "n_h5")
+  missing <- setdiff(required_cols, names(ge_data))
+  if (length(missing) > 0)
+    stop("ge_data is missing required columns: ", paste(missing, collapse = ", "),
+         "\nEnsure prep_ge_data() was called with GOJ detection data.")
+
   obs_strata <- ge_data[ge_data$n_pool > 0, ]
   if (nrow(obs_strata) == 0)
-    stop("No strata have psi-pool observations (n_pool > 0). ",
-         "Check that dat_up and strat_assign are correctly aligned.")
+    stop("No strata have psi-pool observations (n_pool > 0).")
 
+  S <- nrow(obs_strata)
+
+  # Standardise LGR spill on observed strata
   spill_mean <- mean(obs_strata$spill_val, na.rm = TRUE)
   spill_sd   <- sd(obs_strata$spill_val, na.rm = TRUE)
-
   if (!is.finite(spill_sd) || spill_sd == 0)
-    stop("spill_val has zero or undefined SD among observed strata; cannot scale.")
+    stop("spill_val has zero or undefined SD among observed strata.")
 
-  spill_sc <- (obs_strata$spill_val - spill_mean) / spill_sd
+  lgr_spill_std <- (obs_strata$spill_val     - spill_mean) / spill_sd
+  lgs_spill_std <- (obs_strata$lgs_spill_val - mean(obs_strata$lgs_spill_val, na.rm = TRUE)) /
+                    sd(obs_strata$lgs_spill_val, na.rm = TRUE)
+
+  # Build history count matrix and cap N_seen
+  n_mat <- as.matrix(obs_strata[, c("n_h1","n_h2","n_h3","n_h4","n_h5")])
+  N_seen <- rowSums(n_mat)
+  scale  <- pmin(1, max_n / N_seen)
+  n_mat  <- round(sweep(n_mat, 1, scale, "*"))
+  N_seen <- rowSums(n_mat)
 
   jags_data <- list(
-    n_strata   = nrow(obs_strata),
-    n_GRS_pool = obs_strata$n_GRS_pool,
-    n_pool     = obs_strata$n_pool,
-    spill_sc   = spill_sc
+    S             = S,
+    n             = n_mat,
+    N_seen        = N_seen,
+    lgr_spill_std = as.numeric(lgr_spill_std),
+    lgs_spill_std = as.numeric(lgs_spill_std)
   )
 
   model_string <- "
   model {
-    for (s in 1:n_strata) {
-      n_GRS_pool[s] ~ dbin(psi[s], n_pool[s])
-      logit(psi[s]) <- logit_psi[s]
-      logit_psi[s]  ~ dnorm(mu_psi[s], tau_psi)
-      mu_psi[s]     <- alpha + beta * spill_sc[s]
+
+    eps     <- 1.0E-9
+    tau_psi <- pow(sigma_psi, -2)
+    tau_p   <- pow(sigma_p,   -2)
+    tau_phi <- pow(sigma_phi, -2)
+
+    for (s in 1:S) {
+
+      logit_psi[s] ~ dnorm(alpha + beta * lgr_spill_std[s], tau_psi)
+      psi[s] <- ilogit(logit_psi[s])
+
+      logit_p[s] ~ dnorm(alpha_p + beta_p * lgr_spill_std[s], tau_p)
+      p[s] <- ilogit(logit_p[s])
+
+      logit_phi[s] ~ dnorm(alpha_phi + beta_phi * lgs_spill_std[s], tau_phi)
+      phi[s] <- ilogit(logit_phi[s])
+
+      pi_raw[s, 1] <- psi[s] * (1 - phi[s])               + eps
+      pi_raw[s, 2] <- psi[s] * phi[s]                     + eps
+      pi_raw[s, 3] <- (1 - psi[s]) * p[s] * (1 - phi[s])  + eps
+      pi_raw[s, 4] <- (1 - psi[s]) * p[s] * phi[s]        + eps
+      pi_raw[s, 5] <- (1 - psi[s]) * (1 - p[s]) * phi[s]  + eps
+
+      p_seen[s] <- pi_raw[s,1] + pi_raw[s,2] + pi_raw[s,3] +
+                   pi_raw[s,4] + pi_raw[s,5]
+
+      for (k in 1:5) {
+        pi_obs[s, k] <- pi_raw[s, k] / p_seen[s]
+      }
+
+      n[s, 1:5] ~ dmulti(pi_obs[s, 1:5], N_seen[s])
     }
 
-    alpha     ~ dnorm(0, 0.001)
-    beta      ~ dnorm(0, 0.001)
-    tau_psi   <- pow(sigma_psi, -2)
-    sigma_psi ~ dnorm(0, 1) T(0,)
+    # psi (GE): named alpha/beta to match generate_ge_draws expectations
+    alpha     ~ dt(0, pow(2, -2), 7)
+    beta      ~ dt(0, pow(1, -2), 7) T(, 0)
+    sigma_psi ~ dunif(0.05, 3)
+
+    alpha_p  ~ dt(0, pow(2, -2), 7)
+    beta_p   ~ dt(0, pow(1, -2), 7)
+    sigma_p  ~ dunif(0.05, 3)
+
+    # Informative priors from McCann et al. (2023) Table 8.3 LGS steelhead
+    alpha_phi ~ dnorm(-2.60, pow(0.30, -2))
+    beta_phi  ~ dnorm(-1.78, pow(0.25, -2)) T(, 0)
+    sigma_phi ~ dunif(0.05, 1)
   }"
 
   set.seed(seed)
@@ -85,7 +167,10 @@ fit_ge_model <- function(ge_data,
 
   samples <- rjags::coda.samples(
     jags_fit,
-    variable.names = c("psi", "alpha", "beta", "sigma_psi"),
+    variable.names = c("psi", "p", "phi",
+                       "alpha", "beta", "sigma_psi",
+                       "alpha_p", "beta_p", "sigma_p",
+                       "alpha_phi", "beta_phi", "sigma_phi"),
     n.iter = n_iter,
     thin   = n_thin
   )
