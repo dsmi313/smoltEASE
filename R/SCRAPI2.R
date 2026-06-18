@@ -484,8 +484,10 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
       # weighted bootstrap of fish by stratum
       ap_boot <- NULL
       for(h in strats) {
-        jw  <- AllPrimary[which(AllPrimary$Collaps == h), ]
-        idx <- sample.int(nrow(jw), replace = TRUE, prob = jw$SR)
+        jw     <- AllPrimary[which(AllPrimary$Collaps == h), ]
+        sr     <- jw$SR
+        sr[!is.finite(sr) | sr <= 0] <- mean(sr[is.finite(sr) & sr > 0], na.rm = TRUE)
+        idx <- sample.int(nrow(jw), replace = TRUE, prob = sr)
         ap_boot <- rbind(ap_boot, jw[idx, ])
       }
       ap_b <- ap_boot
