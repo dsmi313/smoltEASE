@@ -188,8 +188,14 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
     WildStrata <- PWild * bystrata
     TotalWild  <- sum(WildStrata)
 
+    # Pin grouping to the full level sets so a bootstrap resample missing a
+    # primary group (or stratum) still yields a full [nPgrps x nstrats] matrix;
+    # otherwise Primaryproportions/Primaryests shrink and the assembled theta
+    # vector no longer matches p. Mirrors the Freqs/getAvgProp handling below.
     Primarystrata <- Hmisc::mApply(1/Fish$SR,
-                                   list(Fish$Strat, Fish$PGrp), sum)
+                                   list(factor(Fish$Strat, levels = strats),
+                                        factor(Fish$PGrp,  levels = Pgrps)),
+                                   sum)
     Primarystrata[is.na(Primarystrata)] <- 0
     Primaryproportions <- prop.table(Primarystrata, margin = 2)
     Primaryests        <- Primaryproportions %*% WildStrata
