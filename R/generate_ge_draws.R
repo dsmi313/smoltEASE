@@ -81,15 +81,8 @@ generate_ge_draws <- function(ge_fit,
   for (zi in zero_idx)
     psi_full[, zi] <- plogis(alpha_v + beta_v * ge_data$spill_val[zi])
 
-  # --- Post-hoc GE: vectorised ---
-  n_GRJ <- ge_data$n_GRJ_obs
-  n_GRS <- ge_data$n_GRS_obs
-
-  true_grs <- sweep(1 / psi_full, 2, n_GRS, "*")           # B x n_all
-  denom    <- sweep(true_grs,     2, n_GRJ, "+")           # B x n_all
-  ge_mat   <- matrix(n_GRJ, B, n_all, byrow = TRUE) / denom
-  ge_mat[denom <= 0] <- NA_real_
-  ge_mat   <- pmin(pmax(ge_mat, 0), 1)                     # clip to [0, 1]
+  # psi IS GE in the multistate model (P(JBS route)) -- use directly
+  ge_mat <- pmin(pmax(psi_full, 0), 1)
 
   # Season-mean fallback: n_pool-weighted mean across strata
   pool_wts   <- ifelse(ge_data$n_pool > 0, ge_data$n_pool, 0)
