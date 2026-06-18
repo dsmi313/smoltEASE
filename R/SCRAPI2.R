@@ -90,10 +90,10 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   # Normalise date columns to Date class up front. POSIXct input (common when
   # loaded from DB drivers) prints with timestamp suffixes under table() and
   # then fails to re-parse under as.Date(..., format=dateFormat).
-  All[[Dat]]  <- as.Date(All[[Dat]])
-  pass[[dat]] <- as.Date(pass[[dat]])
+  All[[Dat]]  <- as.Date(All[[Dat]],  tryFormats = c(dateFormat, "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"))
+  pass[[dat]] <- as.Date(pass[[dat]], tryFormats = c(dateFormat, "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"))
   if(!is.null(geDraws))
-    geDraws$SampleEndDate <- as.Date(geDraws$SampleEndDate)
+    geDraws$SampleEndDate <- as.Date(geDraws$SampleEndDate, tryFormats = c(dateFormat, "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"))
 
   # ---- apply strata mapping if supplied ----------------------------------
   if (!is.null(strata)) {
