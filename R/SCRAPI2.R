@@ -287,6 +287,7 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
     ge_pe          <- ifelse(is.na(ge_date_idx_pe),
                              mean(ge_means_pe, na.rm = TRUE),
                              ge_means_pe[ge_date_idx_pe])
+
     pass$true <- pass[, PASSrate] * ge_pe
   } else {
     pass$true <- pass[, PASSrate] * pass[, PASSguideff]
