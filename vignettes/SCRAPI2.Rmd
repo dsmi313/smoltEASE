@@ -161,12 +161,12 @@ instead of producing high-leverage near-zero GE — and GE is **resolved to dail
 spill. All three are opt-in flags; turning them off recovers the collapsed,
 constant-GE fit.
 
-<details><summary>Full JAGS model (single-level shown; nested adds <code>mu_strat[parent[s]]</code>)</summary>
+<details><summary>Full JAGS model (nested — the default; single-level drops <code>mu_strat</code>)</summary>
 
 ```
 model {
-  for (s in 1:S) {
-    logit_psi[s] ~ dnorm(alpha     + beta     * lgr_spill_std[s], tau_psi)   # nested: mu_strat[parent[s]] + beta*...
+  for (s in 1:S) {                                  # s indexes weekly strata
+    logit_psi[s] ~ dnorm(mu_strat[parent[s]] + beta * lgr_spill_std[s], tau_psi)  # week shrinks to its collapse-stratum mean
     logit_p[s]   ~ dnorm(alpha_p   + beta_p   * lgr_spill_std[s], tau_p)
     logit_phi[s] ~ dnorm(alpha_phi + beta_phi * lgs_spill_std[s], tau_phi)
     psi[s] <- ilogit(logit_psi[s])      # psi == GE
@@ -177,11 +177,14 @@ model {
     pi_obs[s,] <- pi_raw[s,] / sum(pi_raw[s,])
   }
   for (j in 1:S_lik) n[lik_idx[j],1:5] ~ dmulti(pi_obs[lik_idx[j],1:5], N_seen[lik_idx[j]])
-  alpha ~ dt(0,pow(2,-2),7); beta ~ dt(0,pow(1,-2),7) T(,0); sigma_psi ~ dunif(0.05,3)
+
+  for (g in 1:n_strat) mu_strat[g] ~ dnorm(alpha, tau_strat)   # collapse-stratum means shrink to the global mean
+  alpha ~ dt(0,pow(2,-2),7); beta ~ dt(0,pow(1,-2),7) T(,0)
+  sigma_psi ~ dunif(0.05,3); sigma_strat ~ dunif(0.05,3)
   alpha_p ~ dt(0,pow(2,-2),7); beta_p ~ dt(0,pow(1,-2),7);   sigma_p   ~ dunif(0.05,3)
   alpha_phi ~ dnorm(-2.60,pow(0.30,-2)); beta_phi ~ dnorm(-1.78,pow(0.25,-2)) T(,0)
   sigma_phi ~ dunif(0.05,1)
-  # nested only: for (g in 1:n_strat) mu_strat[g] ~ dnorm(alpha, tau_strat); sigma_strat ~ dunif(0.05,3)
+  # single-level (no parent_strata): logit_psi[s] ~ dnorm(alpha + beta*lgr_spill_std[s], tau_psi); drop mu_strat/sigma_strat
 }
 ```
 
