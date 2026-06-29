@@ -1,7 +1,7 @@
 Package: smoltEASE
 Type: Package
 Title: Applying EASE uncertainty within SCRAPI smolt estimates
-Version: 0.1.1
+Version: 0.1.2
 Authors@R: c(
     person("David", "Smith", email = "david.smith@idfg.idaho.gov", role = c("aut", "cre")),
     person("Thomas", "Delomas", role = "ctb")

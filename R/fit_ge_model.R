@@ -21,6 +21,15 @@
 #'   prevent the multinomial likelihood from collapsing the posterior in
 #'   data-rich strata (following data-thinning approach of McCann et al. 2023).
 #'
+#'   The model is hierarchical: every stratum's \code{logit(psi)} is drawn from
+#'   the shared spill regression plus process error, so strata may be defined as
+#'   finely as individual weeks. Weeks with sparse PIT data are partially pooled
+#'   toward the regression, and weeks with no detection-history data contribute
+#'   no likelihood term but still receive a regression-based psi (their draws are
+#'   completed in \code{\link{generate_ge_draws}}). To estimate GE weekly, pass a
+#'   \code{strat_assign} to \code{\link{prep_ge_data}} in which \code{Collapse}
+#'   equals \code{Week} (one stratum per week).
+#'
 #' @param ge_data data frame returned by \code{\link{prep_ge_data}}. Must
 #'   contain columns \code{stratum_idx}, \code{n_GRJ_obs}, \code{n_GRS_obs},
 #'   \code{n_pool}, \code{spill_val}, and \code{lgs_spill_val}.
@@ -94,12 +103,24 @@ fit_ge_model <- function(ge_data,
   # Build history count matrix and cap N_seen
   n_mat <- as.matrix(obs_strata[, c("n_h1","n_h2","n_h3","n_h4","n_h5")])
   N_seen <- rowSums(n_mat)
-  scale  <- pmin(1, max_n / N_seen)
+  scale  <- ifelse(N_seen > 0, pmin(1, max_n / N_seen), 1)
   n_mat  <- round(sweep(n_mat, 1, scale, "*"))
   N_seen <- rowSums(n_mat)
 
+  # Strata with detection-history data enter the multinomial likelihood. Strata
+  # with none (possible when estimating weekly with sparse PIT data) still get a
+  # hierarchical psi from the spill regression + process error, but contribute
+  # no likelihood term -- this keeps low-data weeks estimable via partial
+  # pooling rather than dropping or breaking them.
+  lik_idx <- which(N_seen > 0)
+  S_lik   <- length(lik_idx)
+  if (S_lik == 0)
+    stop("No strata have detection-history data (all N_seen == 0).")
+
   jags_data <- list(
     S             = S,
+    S_lik         = S_lik,
+    lik_idx       = as.array(lik_idx),
     n             = n_mat,
     N_seen        = N_seen,
     lgr_spill_std = as.numeric(lgr_spill_std),
@@ -137,8 +158,11 @@ fit_ge_model <- function(ge_data,
       for (k in 1:5) {
         pi_obs[s, k] <- pi_raw[s, k] / p_seen[s]
       }
+    }
 
-      n[s, 1:5] ~ dmulti(pi_obs[s, 1:5], N_seen[s])
+    # multinomial likelihood only for strata with detection-history data
+    for (j in 1:S_lik) {
+      n[lik_idx[j], 1:5] ~ dmulti(pi_obs[lik_idx[j], 1:5], N_seen[lik_idx[j]])
     }
 
     # psi (GE): named alpha/beta to match generate_ge_draws expectations
