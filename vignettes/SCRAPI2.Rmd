@@ -96,7 +96,7 @@ gsi_draws <- read.delim("OmyLGRJ25C_gsiDraws_final.txt", sep = "\t",
 
 # Week -> collapse-stratum map (STHD tab). Drives the GE model and the trap's
 # Collapse join for legacy SCRAPI; also the parent grouping for nested weekly GE.
-strata_raw  <- read_xlsx("Smolt_Strata.xlsx", sheet = 1)
+strata_raw  <- read_xlsx("Smolt Strata.xlsx", sheet = 1)
 sthd_start  <- which(strata_raw[[1]] == "WeekNumber" & strata_raw[[2]] == "STHD_n")
 sthd_strata <- strata_raw[(sthd_start + 1):nrow(strata_raw), c(1, 3)] |>
   set_names(c("Week", "Collapse")) |>
