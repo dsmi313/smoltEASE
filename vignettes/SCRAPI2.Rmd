@@ -16,12 +16,7 @@ vignette: >
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(
-  echo    = TRUE,
-  message = FALSE,
-  warning = FALSE,
-  eval    = TRUE
-)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE)
 ```
 
 ---
@@ -31,49 +26,31 @@ knitr::opts_chunk$set(
 ## What SCRAPI does
 
 SCRAPI (Steinhorst & Ackerman) estimates wild smolt escapement past Lower Granite
-Dam (LGR) by expanding trap catches to the full passage using a daily sampling
-rate. The core formula for daily estimated passage is:
+Dam (LGR) by expanding trap catches to full passage with a daily sampling rate:
 
 $$\hat{N}_d = \frac{C_d}{R_d \times GE_d}$$
 
-where $C_d$ is the trap count, $R_d$ is the sampling rate (fraction of fish
-entering the bypass that are trapped), and $GE_d$ is the guidance efficiency —
-the fraction of all downstream migrants that actually enter the juvenile bypass
-system. The bootstrap resamples both the passage counts and the trap fish to
-propagate uncertainty in $R_d$ and the stock/rear composition into the CIs.
+$C_d$ is the trap count, $R_d$ the sampling rate, and $GE_d$ the guidance
+efficiency — the fraction of migrants entering the juvenile bypass. The bootstrap
+resamples passage counts and trap fish, propagating uncertainty in $R_d$ and the
+stock/rear composition into the CIs.
 
 ## The GE problem
 
-Historically, $GE_d$ is a **fixed point estimate** taken from a NOAA table
-(modelled from spill and fish-behaviour studies). Plugging in a fixed $GE$ means
-the bootstrap CIs reflect only uncertainty in trap sampling — not uncertainty in
-GE itself. Under post-ROD operations LGR runs at 80–85% spill during peak
-migration, where GE is both low and poorly constrained, so a fixed GE can badly
-understate the true uncertainty in escapement.
+Historically $GE_d$ is a **fixed** NOAA point estimate, so the CIs reflect only
+trap-sampling uncertainty — not uncertainty in GE. Under post-ROD operations LGR
+runs at 80–85% spill during peak migration, where GE is low and poorly
+constrained, so a fixed GE badly understates the uncertainty in escapement.
 
 ## What SCRAPI2 adds
 
-`SCRAPI2` extends the SCRAPI logic in two ways, used independently or together:
-
-1. **GE draws (`geDraws`)** — instead of a single $GE_d$ per day, supply a
-   matrix of posterior draws from a Bayesian hierarchical model
-   (`fit_ge_model()` / `generate_ge_draws()`). Each bootstrap iteration uses a
-   different column (draw), so GE uncertainty flows through into the CIs. The GE
-   model can be fit at any stratum resolution (down to weekly), shrink fine
-   strata toward coarser parents, and resolve GE to a daily value that tracks
-   daily spill — see Section 4.
-
-2. **GSI draws (`gsiDraws`)** — instead of fixed stock assignments in the trap,
-   supply posterior draws from a genetic stock identification model. Each
-   bootstrap iteration uses a different draw so genetic uncertainty flows through
-   into per-stock CIs. This mirrors the adult-side **EASE** framework: one column
-   per posterior sample, one row per fish, keyed by `MasterID`.
-
-**Key guarantee (validated below):** when every column of `geDraws` is identical
-(or when `geDraws = NULL` and a fixed `GuidanceEfficiency` column is supplied)
-and `gsiDraws = NULL`, `SCRAPI2` reproduces `SCOBI::SCRAPI` to within bootstrap
-noise. SCRAPI2 changes *what uncertainty is propagated*, not the underlying
-estimation arithmetic.
+`SCRAPI2` propagates two extra sources, independently or together: **`geDraws`**
+(per-day posterior GE draws from a Bayesian model) and **`gsiDraws`** (per-fish
+posterior stock-assignment draws, the adult-side EASE format). Each bootstrap
+iteration consumes one draw. **Guarantee (validated in §5, §7):** with degenerate
+draws (every column equal, or `geDraws = NULL` + a fixed `GuidanceEfficiency`
+column, and `gsiDraws = NULL`), `SCRAPI2` reproduces `SCOBI::SCRAPI` to within
+bootstrap noise — it changes *what uncertainty is propagated*, not the arithmetic.
 
 ---
 
@@ -89,13 +66,9 @@ library(tidyverse)
 library(lubridate)
 library(readxl)
 library(scales)
-library(coda)      # gelman.diag for MCMC convergence
-```
+library(coda)        # gelman.diag
 
-```{r config}
-B <- 2000   # bootstrap iterations (and GE/GSI draws)
-
-# Date window for the migration year
+B            <- 2000                 # bootstrap iterations / draws
 season_start <- ymd("2025-03-24")
 season_end   <- ymd("2025-08-01")
 ```
@@ -104,98 +77,57 @@ season_end   <- ymd("2025-08-01")
 
 # Data inputs
 
-All dates are handled as `"%m/%d/%Y"` strings (the trap/FPC convention) and
-`SCRAPI2`/`SCRAPI` are called with `dateFormat = "%m/%d/%Y"`.
+Dates are handled as `"%m/%d/%Y"` strings; `SCRAPI2`/`SCRAPI` use
+`dateFormat = "%m/%d/%Y"`.
 
-## Trap, FPC and GSI draws
-
-```{r data-load}
-# Pre-formatted trap data: one row per sampled smolt (CollectionDate, Rear,
-# GenStock, fwAge, MasterID). Normalise CollectionDate to "%m/%d/%Y".
+```{r files}
+# Pre-formatted trap (one row per smolt) and FPC passage (Collapse strata + the
+# fixed NOAA GuidanceEfficiency already merged in).
 STHD.trap <- read.csv("MY2025STHD.trapData_formatted.csv")
-STHD.trap$CollectionDate <- format(as.Date(STHD.trap$CollectionDate, "%Y-%m-%d"),
-                                    "%m/%d/%Y")
-
-# FPC passage data with weekly `Collapse` strata AND the fixed NOAA
-# `GuidanceEfficiency` already merged in (one row per passage day).
-STHD.FPC <- read.csv("MY2025STHDsmolts_FPCdata_strata_added.csv")
-STHD.FPC$SampleEndDate <- format(as.Date(STHD.FPC$SampleEndDate, "%m/%d/%Y"),
-                                 "%m/%d/%Y")
+STHD.FPC  <- read.csv("MY2025STHDsmolts_FPCdata_strata_added.csv")
+STHD.trap$CollectionDate <- format(as.Date(STHD.trap$CollectionDate, "%Y-%m-%d"), "%m/%d/%Y")
+STHD.FPC$SampleEndDate   <- format(as.Date(STHD.FPC$SampleEndDate,   "%m/%d/%Y"), "%m/%d/%Y")
+stopifnot(all(c("Week", "Collapse", "GuidanceEfficiency", "SampleEndDate",
+                "SampleCount", "SampleRate") %in% names(STHD.FPC)))
 
 # GSI posterior draws: column 1 = MasterID, remaining columns = stock draws.
-gsi_draws <- read.delim("OmyLGRJ25C_gsiDraws_final.txt",
-                        sep = "\t", header = TRUE, check.names = FALSE)
+gsi_draws <- read.delim("OmyLGRJ25C_gsiDraws_final.txt", sep = "\t",
+                        header = TRUE, check.names = FALSE)
 
-stopifnot(all(c("Collapse", "GuidanceEfficiency", "SampleEndDate",
-                "SampleCount", "SampleRate", "Week") %in% names(STHD.FPC)))
-```
-
-## Strata mapping
-
-Week-to-stratum collapse mapping from the `STHD` tab of `Smolt_Strata.xlsx`.
-Reused as the passage-bootstrap strata and (Section 4.7) the *parent* grouping
-for nested weekly GE. The FPC already carries `Collapse`; this table drives the
-GE model and the legacy `Collapse` join for the trap.
-
-```{r strata, R.options=list(width=200)}
-strata_raw <- read_xlsx("Smolt_Strata.xlsx", sheet = 1)
-sthd_start <- which(strata_raw[[1]] == "WeekNumber" & strata_raw[[2]] == "STHD_n")
-
+# Week -> collapse-stratum map (STHD tab). Drives the GE model and the trap's
+# Collapse join for legacy SCRAPI; also the parent grouping for nested weekly GE.
+strata_raw  <- read_xlsx("Smolt_Strata.xlsx", sheet = 1)
+sthd_start  <- which(strata_raw[[1]] == "WeekNumber" & strata_raw[[2]] == "STHD_n")
 sthd_strata <- strata_raw[(sthd_start + 1):nrow(strata_raw), c(1, 3)] |>
   set_names(c("Week", "Collapse")) |>
   filter(!is.na(Week)) |>
   mutate(Week = as.integer(Week), Collapse = as.integer(Collapse))
-
-genstock_by_week(STHD.trap, species = "sthd")   # composition by week (optional QC)
 ```
 
-## PIT detections for the GE model
-
-GRJ (bypass), GRS (spillway bay 1) and GOJ (Little Goose bypass) first-detections
-per tag, restricted to the migration window. This `pit_raw` is the `dat_up`
-input to `prep_ge_data()` (tag / site / det_date).
-
-```{r pit-prep}
+```{r derive}
+# PIT first-detections at GRJ (bypass), GRS (spillway bay 1), GOJ (Little Goose).
 pit_raw <- read_csv("MY25_STHD.csv") |>
-  mutate(
-    site     = str_extract(`Site Name`, "^[A-Z]+"),
-    obs_date = as_date(parse_date_time(`Obs Time Value`,
-                                       orders = c("mdy HM", "mdy HMS")))
-  ) |>
-  filter(
-    `Rear Type Code` %in% c("W", "H", "U"),
-    site %in% c("GRJ", "GRS", "GOJ"),
-    obs_date >= season_start, obs_date < season_end
-  ) |>
+  mutate(site     = str_extract(`Site Name`, "^[A-Z]+"),
+         obs_date = as_date(parse_date_time(`Obs Time Value`,
+                                            orders = c("mdy HM", "mdy HMS")))) |>
+  filter(`Rear Type Code` %in% c("W", "H", "U"),
+         site %in% c("GRJ", "GRS", "GOJ"),
+         obs_date >= season_start, obs_date < season_end) |>
   group_by(`Tag Code`, site) |>
   slice_min(obs_date, with_ties = FALSE) |>
   ungroup() |>
   rename(tag = `Tag Code`, det_date = obs_date)
-```
 
-## Daily spill (LGR and LGS)
-
-LGR spill is the covariate for $\psi$ (GE) and $p$, and (Section 4.7) drives the
-daily GE downscale. LGS spill is the covariate for the GOJ detection probability
-$\phi$.
-
-```{r spill}
-# LGR daily spill (% of flow)
+# Daily spill (% of flow): LGR drives psi/p (and the daily GE downscale); LGS phi.
 lgr_spill <- read_csv("DART Spill.csv") |>
-  mutate(
-    Date      = mdy(date),
-    spill.per = as.numeric(spill_kcfs) / as.numeric(outflow_kcfs) * 100,
-    spill.per = replace_na(spill.per, 0)
-  ) |>
+  mutate(Date = mdy(date),
+         spill.per = replace_na(as.numeric(spill_kcfs) / as.numeric(outflow_kcfs) * 100, 0)) |>
   filter(Date >= season_start, Date < season_end) |>
   select(Date, spill.per)
 
-# LGS daily spill, aggregated from hourly files
-lgs_spill <- bind_rows(
-  read_csv("spill.all.csv"), read_csv("spill.all2.csv"), read_csv("spill.all3.csv")
-) |>
-  mutate(dt = mdy_hm(DateTime), Date = as_date(dt),
-         spill.per = HourlySpill / HourlyFlow * 100) |>
+lgs_spill <- bind_rows(read_csv("spill.all.csv"), read_csv("spill.all2.csv"),
+                       read_csv("spill.all3.csv")) |>
+  mutate(Date = as_date(mdy_hm(DateTime)), spill.per = HourlySpill / HourlyFlow * 100) |>
   filter(Site == "LGS", Date >= season_start, Date < season_end) |>
   group_by(Date) |>
   summarise(spill.per = mean(spill.per, na.rm = TRUE), .groups = "drop")
@@ -203,298 +135,189 @@ lgs_spill <- bind_rows(
 
 ---
 
-# The Bayesian GE model
+# The GE model — weekly, stratum-guided, daily
 
 ## What it estimates
 
-The current model is a **multistate mark-recapture model** (after Hance et al.
-2020/2024), not the legacy binomial psi-pool. From PIT-tagged fish detected at
-GRJ (bypass), GRS (spillway bay 1) and GOJ (Little Goose bypass) it jointly
-estimates, per stratum $s$, three probabilities:
+A **multistate mark-recapture model** (after Hance et al. 2020/2024). From
+GRJ/GRS/GOJ detections it jointly estimates, per stratum $s$:
 
-- $\psi_s$ — probability a fish passing LGR takes the **juvenile bypass** route.
-  **This is guidance efficiency directly:** $GE_s = \psi_s$.
-- $p_s$ — probability a spillway fish is **detected at the GRS** bay-1 antenna.
-- $\phi_s$ — probability a fish is **detected at GOJ** downstream.
+- $\psi_s$ — P(fish takes the **bypass** route). **This is GE:** $GE_s=\psi_s$.
+- $p_s$ — P(spillway fish **detected at GRS** bay 1).
+- $\phi_s$ — P(fish **detected at GOJ** downstream).
 
-Each detected fish falls into one of five histories, with cell probabilities
-(conditioned on being detected somewhere):
+Detected fish fall into five histories with probabilities (conditioned on
+detection): $\psi(1{-}\phi)$, $\psi\phi$, $(1{-}\psi)p(1{-}\phi)$,
+$(1{-}\psi)p\phi$, $(1{-}\psi)(1{-}p)\phi$. The last — missed at LGR, seen at GOJ
+— makes $p$ (and hence $\psi$) identifiable. Each parameter is a hierarchical
+logistic regression on spill ($\psi,p$ on LGR; $\phi$ on LGS), with
+weakly-informative Student-$t$ priors ($\beta\le0$) and **informative McCann
+(2023) priors on $\phi$**.
 
-$$
-\begin{aligned}
-\text{(GRJ, no GOJ)}\ &:\ \psi_s (1-\phi_s) \\
-\text{(GRJ, GOJ)}\ &:\ \psi_s \phi_s \\
-\text{(GRS, no GOJ)}\ &:\ (1-\psi_s)\, p_s (1-\phi_s) \\
-\text{(GRS, GOJ)}\ &:\ (1-\psi_s)\, p_s \phi_s \\
-\text{(no LGR, GOJ)}\ &:\ (1-\psi_s)(1-p_s)\phi_s
-\end{aligned}
-$$
+**This vignette's default is the fully-resolved model:** strata are **weeks**,
+each week's $\text{logit}(\psi)$ is **nested** in (shrinks toward) its
+collapse-stratum mean `mu_strat[parent]` — so sparse weeks borrow strength
+instead of producing high-leverage near-zero GE — and GE is **resolved to daily**
+spill. All three are opt-in flags; turning them off recovers the collapsed,
+constant-GE fit.
 
-The last cell — fish missed by both LGR arrays but recovered at GOJ — is what
-makes $p_s$ (and hence $\psi_s$) identifiable. The stratum counts of the five
-histories follow a multinomial likelihood. Each parameter is a **hierarchical
-logistic regression on spill** ($\psi$ and $p$ on LGR spill, $\phi$ on LGS
-spill), with weakly-informative Student-$t$ priors for $\psi/p$ (and $\beta\le0$:
-more spill cannot raise guidance) and **informative Normal priors on the $\phi$
-coefficients from McCann et al. (2023) Table 8.3**. The hierarchy lets strata be
-as fine as weeks; sparse weeks are partially pooled toward the spill regression.
-
-## The JAGS model
-
-This is the single-level model `fit_ge_model()` builds internally (the nested
-variant of Section 4.7 replaces the `logit_psi` line with a parent-group mean):
+<details><summary>Full JAGS model (single-level shown; nested adds <code>mu_strat[parent[s]]</code>)</summary>
 
 ```
 model {
   for (s in 1:S) {
-    logit_psi[s] ~ dnorm(alpha     + beta     * lgr_spill_std[s], tau_psi)
+    logit_psi[s] ~ dnorm(alpha     + beta     * lgr_spill_std[s], tau_psi)   # nested: mu_strat[parent[s]] + beta*...
     logit_p[s]   ~ dnorm(alpha_p   + beta_p   * lgr_spill_std[s], tau_p)
     logit_phi[s] ~ dnorm(alpha_phi + beta_phi * lgs_spill_std[s], tau_phi)
-    psi[s] <- ilogit(logit_psi[s])     # psi == GE
-    p[s]   <- ilogit(logit_p[s])
-    phi[s] <- ilogit(logit_phi[s])
-
-    pi_raw[s,1] <- psi[s]*(1-phi[s])                # GRJ, no GOJ
-    pi_raw[s,2] <- psi[s]*phi[s]                     # GRJ, GOJ
-    pi_raw[s,3] <- (1-psi[s])*p[s]*(1-phi[s])        # GRS, no GOJ
-    pi_raw[s,4] <- (1-psi[s])*p[s]*phi[s]            # GRS, GOJ
-    pi_raw[s,5] <- (1-psi[s])*(1-p[s])*phi[s]        # no LGR, GOJ
-    pi_obs[s,] <- pi_raw[s,] / sum(pi_raw[s,])       # condition on detection
+    psi[s] <- ilogit(logit_psi[s])      # psi == GE
+    p[s]   <- ilogit(logit_p[s]); phi[s] <- ilogit(logit_phi[s])
+    pi_raw[s,1] <- psi[s]*(1-phi[s]);           pi_raw[s,2] <- psi[s]*phi[s]
+    pi_raw[s,3] <- (1-psi[s])*p[s]*(1-phi[s]);  pi_raw[s,4] <- (1-psi[s])*p[s]*phi[s]
+    pi_raw[s,5] <- (1-psi[s])*(1-p[s])*phi[s]
+    pi_obs[s,] <- pi_raw[s,] / sum(pi_raw[s,])
   }
   for (j in 1:S_lik) n[lik_idx[j],1:5] ~ dmulti(pi_obs[lik_idx[j],1:5], N_seen[lik_idx[j]])
-
-  alpha ~ dt(0, pow(2,-2), 7);  beta ~ dt(0, pow(1,-2), 7) T(,0);  sigma_psi ~ dunif(0.05,3)
-  alpha_p ~ dt(0, pow(2,-2), 7); beta_p ~ dt(0, pow(1,-2), 7);     sigma_p   ~ dunif(0.05,3)
-  alpha_phi ~ dnorm(-2.60, pow(0.30,-2))           # McCann et al. 2023, Tab 8.3
-  beta_phi  ~ dnorm(-1.78, pow(0.25,-2)) T(,0)
+  alpha ~ dt(0,pow(2,-2),7); beta ~ dt(0,pow(1,-2),7) T(,0); sigma_psi ~ dunif(0.05,3)
+  alpha_p ~ dt(0,pow(2,-2),7); beta_p ~ dt(0,pow(1,-2),7);   sigma_p   ~ dunif(0.05,3)
+  alpha_phi ~ dnorm(-2.60,pow(0.30,-2)); beta_phi ~ dnorm(-1.78,pow(0.25,-2)) T(,0)
   sigma_phi ~ dunif(0.05,1)
+  # nested only: for (g in 1:n_strat) mu_strat[g] ~ dnorm(alpha, tau_strat); sigma_strat ~ dunif(0.05,3)
 }
 ```
 
-## Prepare the stratum-level GE data
+</details>
 
-```{r ge-prep}
-ge_data <- prep_ge_data(
-  dat_up         = pit_raw,
-  strat_assign   = sthd_strata,
-  spill_data     = lgr_spill,
-  lgs_spill_data = lgs_spill,
-  species        = "sthd",
-  goj_site       = "GOJ"
-)
-
-ge_data %>%
-  select(stratum, spill_LGR = spill_val, spill_LGS = lgs_spill_val,
-         n_pool, n_GRJ = n_GRJ_obs, n_GRS = n_GRS_obs,
-         n_h1, n_h2, n_h3, n_h4, n_h5) %>%
-  knitr::kable(caption = "Stratum-level inputs to the multistate GE model")
-```
-
-## Fit the model and check convergence
+## Fit (weekly, nested, daily — the default)
 
 ```{r ge-fit}
-ge_fit <- fit_ge_model(ge_data, max_n = 500, seed = 42)
+sthd_weekly <- transform(sthd_strata, Collapse = Week)   # one stratum per week
 
-# R-hat on GE parameters (psi == GE) and the psi regression scalars; want < 1.05
-psi_cols <- grep("^psi\\[|^alpha$|^beta$|^sigma_psi$",
-                 coda::varnames(ge_fit$samples))
-gelman.diag(ge_fit$samples[, psi_cols], autoburnin = FALSE, multivariate = FALSE)
-```
-
-## Stratum GE (model posterior) vs NOAA fixed GE
-
-Because $GE_s = \psi_s$, the stratum-level model GE is the $\psi$ posterior. We
-compare it to the fixed NOAA GE carried in the FPC, aggregated to the same
-strata.
-
-```{r ge-compare-table}
-noaa_by_collapse <- STHD.FPC %>%
-  group_by(Collapse) %>%
-  summarise(NOAA_GE = round(mean(GuidanceEfficiency, na.rm = TRUE), 3),
-            .groups = "drop")
-
-psi_mat <- as.matrix(ge_fit$samples)[, grep("^psi\\[",
-             coda::varnames(ge_fit$samples)), drop = FALSE]
-
-ge_by_stratum <- data.frame(
-  stratum   = ge_fit$obs_strata$stratum,
-  spill_LGR = round(ge_fit$obs_strata$spill_val, 1),
-  Model_GE  = round(colMeans(psi_mat), 3),
-  Model_lo  = round(apply(psi_mat, 2, quantile, 0.025), 3),
-  Model_hi  = round(apply(psi_mat, 2, quantile, 0.975), 3)
-) %>%
-  left_join(noaa_by_collapse, by = c("stratum" = "Collapse"))
-
-knitr::kable(
-  ge_by_stratum,
-  col.names = c("Stratum", "Spill (%)", "Model GE", "2.5%ile", "97.5%ile",
-                "NOAA fixed GE"),
-  caption   = "Stratum GE: multistate model posterior (95% CI) vs NOAA fixed"
+ge_data <- prep_ge_data(
+  dat_up = pit_raw, strat_assign = sthd_weekly,
+  spill_data = lgr_spill, lgs_spill_data = lgs_spill,
+  species = "sthd", goj_site = "GOJ",
+  parent_strata = sthd_strata                            # weeks nested in collapse strata
 )
-```
 
-```{r ge-compare-plot}
-ge_by_stratum %>%
-  pivot_longer(c(Model_GE, NOAA_GE), names_to = "source", values_to = "GE") %>%
-  ggplot(aes(spill_LGR, GE, colour = source, label = stratum)) +
-  geom_line(aes(group = source), linewidth = 0.8) +
-  geom_point(size = 3) +
-  geom_text(nudge_y = 0.01, show.legend = FALSE, size = 3) +
-  scale_colour_manual(values = c(Model_GE = "#d73027", NOAA_GE = "#4dac26"),
-                      labels = c(Model_GE = "Model GE (psi)",
-                                 NOAA_GE  = "NOAA fixed GE")) +
-  labs(title = "GE by stratum: multistate model vs NOAA",
-       x = "Mean LGR spill (%)", y = "Guidance efficiency", colour = NULL) +
-  theme_minimal(base_size = 13)
-```
+ge_fit <- fit_ge_model(ge_data, max_n = 500, seed = 42)  # nesting auto-detected
 
-## Generate GE draws for SCRAPI2
-
-Each `boot_*` column is one posterior draw of daily GE; `SCRAPI2` consumes one
-column per bootstrap iteration (the same mechanism as GSI draws).
-
-```{r ge-draws}
+# Daily-resolved GE draws (one column per bootstrap iteration)
 ge_draws <- generate_ge_draws(
-  ge_fit       = ge_fit,
-  strat_assign = sthd_strata,
-  pass_dates   = as.Date(STHD.FPC$SampleEndDate, "%m/%d/%Y"),
-  B            = B
+  ge_fit, strat_assign = sthd_weekly,
+  pass_dates  = as.Date(STHD.FPC$SampleEndDate, "%m/%d/%Y"),
+  B           = B,
+  daily_spill = lgr_spill
 )
 
-stopifnot(nrow(ge_draws) == nrow(STHD.FPC))
-stopifnot(all(unlist(ge_draws[, -1]) >= 0), all(unlist(ge_draws[, -1]) <= 1))
-cat("Posterior mean GE by day:\n"); summary(rowMeans(ge_draws[, -1]))
+# Convergence: psi (= GE), parent means, and the regression scalars; want < 1.05
+mon <- grep("^psi\\[|^mu_strat\\[|^alpha$|^beta$|^sigma_psi$|^sigma_strat$",
+            coda::varnames(ge_fit$samples))
+gelman.diag(ge_fit$samples[, mon], autoburnin = FALSE, multivariate = FALSE)
+
+stopifnot(nrow(ge_draws) == nrow(STHD.FPC),
+          all(unlist(ge_draws[, -1]) >= 0), all(unlist(ge_draws[, -1]) <= 1))
 ```
 
-## Finer resolution: weekly strata, nested shrinkage, daily spill
+## Stratum-guided weekly GE
 
-The same functions support a finer, more defensible GE without changing
-`SCRAPI2`. All are opt-in.
+One picture of the whole GE model: the **weekly** posterior GE (point + 95%
+ribbon) tracks daily spill, while shrinking toward its **collapse-stratum** mean
+(the parent it is guided by). Both sit well below the **NOAA fixed** GE once
+spill ramps up.
 
-- **Weekly strata** — pass a `strat_assign` with `Collapse = Week`.
-- **Nested shrinkage** — pass your `Week`/`Collapse` table as `parent_strata`;
-  each week's $\psi$ shrinks toward its collapse-stratum mean, so sparse weeks
-  borrow strength instead of producing high-leverage near-zero GE. Data-driven,
-  no floor.
-- **Daily spill** — pass `daily_spill` to `generate_ge_draws()`; GE follows that
-  day's spill via the fitted regression, anchored by each draw's stratum
-  deviation (days share $\alpha,\beta,\varepsilon$ within a draw, so no spurious
-  independent daily noise).
+```{r ge-diagnostic, fig.width=9, fig.height=4.5}
+ge_mat <- as.matrix(ge_draws[, -1])
+ge_day <- tibble(
+  date     = as.Date(ge_draws$SampleEndDate, "%m/%d/%Y"),
+  Collapse = STHD.FPC$Collapse,
+  weekly   = rowMeans(ge_mat),
+  lo       = apply(ge_mat, 1, quantile, 0.025),
+  hi       = apply(ge_mat, 1, quantile, 0.975),
+  NOAA     = STHD.FPC$GuidanceEfficiency
+) |>
+  group_by(Collapse) |>
+  mutate(stratum = mean(weekly)) |>     # parent collapse-stratum GE
+  ungroup()
 
-```{r ge-weekly-nested-daily, eval=FALSE}
-sthd_weekly <- transform(sthd_strata, Collapse = Week)        # one stratum per week
-
-ge_data_wk <- prep_ge_data(
-  dat_up = pit_raw, strat_assign = sthd_weekly, spill_data = lgr_spill,
-  lgs_spill_data = lgs_spill, species = "sthd", goj_site = "GOJ",
-  parent_strata = sthd_strata)                                # weeks nested in strata
-ge_fit_wk <- fit_ge_model(ge_data_wk, max_n = 500, seed = 42) # nested model auto-detected
-
-ge_draws_daily <- generate_ge_draws(
-  ge_fit_wk, strat_assign = sthd_weekly,
-  pass_dates = as.Date(STHD.FPC$SampleEndDate, "%m/%d/%Y"),
-  B = B, daily_spill = lgr_spill)                             # daily-resolved GE
-# ge_draws_daily plugs into SCRAPI2 exactly like ge_draws.
+ggplot(ge_day, aes(date)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "#d73027", alpha = 0.15) +
+  geom_line(aes(y = weekly,  colour = "Weekly model GE (daily)"), linewidth = 0.9) +
+  geom_line(aes(y = stratum, colour = "Collapse-stratum GE (parent)"), linewidth = 0.8) +
+  geom_line(aes(y = NOAA,    colour = "NOAA fixed GE"), linetype = "dashed") +
+  scale_colour_manual(values = c("Weekly model GE (daily)"     = "#d73027",
+                                 "Collapse-stratum GE (parent)" = "#2166ac",
+                                 "NOAA fixed GE"                = "grey30")) +
+  scale_y_continuous("Guidance efficiency", labels = percent_format(accuracy = 1)) +
+  labs(x = NULL, colour = NULL,
+       title = "Stratum-guided weekly GE vs NOAA fixed — MY2025") +
+  theme_minimal(base_size = 13) + theme(legend.position = "top")
 ```
 
 ---
 
 # Three-way comparison
 
-Three workflows on the same MY2025 steelhead data; same fish, same passage.
+Same data, three GE treatments. **A vs B** validates that `SCRAPI2` did not change
+the SCRAPI arithmetic; **C** is the weekly+nested+daily default and should have
+**wider** CIs (GE uncertainty propagated).
 
 | Workflow | GE source | Tool |
 |---|---|---|
 | **A — Legacy** | NOAA `GuidanceEfficiency` (in FPC) | `SCOBI::SCRAPI` |
 | **B — SCRAPI2 fixed GE** | Same NOAA column, no uncertainty | `SCRAPI2` (`geDraws = NULL`) |
-| **C — SCRAPI2 model GE** | Bayesian posterior draws | `SCRAPI2` (`geDraws = ge_draws`) |
+| **C — SCRAPI2 model GE** | Weekly + nested + daily draws | `SCRAPI2` (`geDraws = ge_draws`) |
 
-Paths A and B should produce near-identical point estimates and CI widths
-(validating that `SCRAPI2` did not change the SCRAPI logic). Path C should have
-**wider** CIs because GE uncertainty is now propagated.
-
-## Helper: add Collapse to the trap for legacy SCOBI::SCRAPI
-
-`SCOBI::SCRAPI` needs `Collapse` in both data frames. The FPC already has it; the
-trap does not, so map it on from `sthd_strata`.
-
-```{r add-collapse-helper}
-add_collapse <- function(df, date_col, strata_tbl) {
-  d              <- as.Date(df[[date_col]], "%m/%d/%Y")
-  df$Week        <- isoweek(d)
-  df             <- left_join(df, strata_tbl, by = "Week")
-  df[[date_col]] <- format(d, "%m/%d/%Y")
-  df
-}
+```{r scrapi2-args, include=FALSE}
+# shared SCRAPI2 column mapping / settings
+s2 <- function(...) SCRAPI2(
+  passageData = STHD.FPC, Primary = "GenStock",
+  strat = "Week", dat = "SampleEndDate", tally = "SampleCount",
+  samrate = "SampleRate", guidance = "GuidanceEfficiency", collaps = "Collapse",
+  RTYPE = "W", alph = 0.05, dateFormat = "%m/%d/%Y", B = B, ...)
 ```
 
 ## Path A — Legacy `SCOBI::SCRAPI`
 
-```{r path-a-legacy}
+`SCOBI::SCRAPI` needs `Collapse` in both frames. The FPC has it; map it onto the
+trap from `sthd_strata`.
+
+```{r path-a}
+add_collapse <- function(df, date_col, strata_tbl) {
+  d <- as.Date(df[[date_col]], "%m/%d/%Y")
+  df$Week <- isoweek(d); df <- left_join(df, strata_tbl, by = "Week")
+  df[[date_col]] <- format(d, "%m/%d/%Y"); df
+}
 STHD.trap_legacy <- add_collapse(STHD.trap, "CollectionDate", sthd_strata)
 stopifnot(!anyNA(STHD.trap_legacy$Collapse), !anyNA(STHD.FPC$Collapse))
 
-SCOBI::SCRAPI(
-  smoltData   = STHD.trap_legacy,
-  passageData = STHD.FPC,                 # carries Collapse + GuidanceEfficiency
-  Primary     = "GenStock",
-  dateFormat  = "%m/%d/%Y",
-  Run         = "legacy_",
-  B           = B
-)
+SCOBI::SCRAPI(smoltData = STHD.trap_legacy, passageData = STHD.FPC,
+              Primary = "GenStock", dateFormat = "%m/%d/%Y", Run = "legacy_", B = B)
 
-# SCOBI::SCRAPI returns NULL and writes CSV; read it back, dropping footer rows.
-legacy_ci <- read.csv("legacy_CIs.csv", skip = 1,
-                      header = TRUE, row.names = 1, check.names = FALSE) %>%
+legacy_ci <- read.csv("legacy_CIs.csv", skip = 1, header = TRUE,
+                      row.names = 1, check.names = FALSE) %>%
   filter(!grepl("SampleSize", rownames(.)))
 ```
 
-## Path B — `SCRAPI2` with fixed GE (validation run)
+## Paths B and C — `SCRAPI2`
 
-```{r path-b-fixed-ge}
-result_fixed <- SCRAPI2(
-  smoltData   = STHD.trap,
-  passageData = STHD.FPC,                 # fixed NOAA GuidanceEfficiency, geDraws = NULL
-  Primary     = "GenStock",
-  strat       = "Week", dat = "SampleEndDate", tally = "SampleCount",
-  samrate     = "SampleRate", guidance = "GuidanceEfficiency", collaps = "Collapse",
-  RTYPE       = "W", alph = 0.05, dateFormat = "%m/%d/%Y",
-  Run         = "fixed_", B = B
-)
-```
-
-## Path C — `SCRAPI2` with Bayesian GE draws
-
-```{r path-c-model-ge}
-result_model <- SCRAPI2(
-  smoltData   = STHD.trap,
-  passageData = STHD.FPC,
-  geDraws     = ge_draws,
-  Primary     = "GenStock",
-  strat       = "Week", dat = "SampleEndDate", tally = "SampleCount",
-  samrate     = "SampleRate", guidance = "GuidanceEfficiency", collaps = "Collapse",
-  RTYPE       = "W", alph = 0.05, dateFormat = "%m/%d/%Y",
-  Run         = "model_", B = B
-)
+```{r paths-bc}
+result_fixed <- s2(smoltData = STHD.trap, Run = "fixed_")                 # fixed NOAA GE
+result_model <- s2(smoltData = STHD.trap, geDraws = ge_draws, Run = "model_")  # weekly+nested+daily
 ```
 
 ---
 
 # Results
 
-## Wild smolt totals
-
 ```{r results-table}
-ci_df <- function(mat, label) {
+ci_df <- function(mat, label)
   as.data.frame(mat) %>% rownames_to_column("Stock") %>% mutate(Workflow = label)
-}
 
-tbl_legacy <- legacy_ci %>% rownames_to_column("Stock") %>%
-  mutate(Workflow = "A: SCOBI legacy")
-tbl_fixed  <- ci_df(result_fixed$CI, "B: SCRAPI2 fixed GE")
-tbl_model  <- ci_df(result_model$CI, "C: SCRAPI2 model GE")
-
-results_all <- bind_rows(tbl_legacy, tbl_fixed, tbl_model)
+results_all <- bind_rows(
+  legacy_ci %>% rownames_to_column("Stock") %>% mutate(Workflow = "A: SCOBI legacy"),
+  ci_df(result_fixed$CI, "B: SCRAPI2 fixed GE"),
+  ci_df(result_model$CI, "C: SCRAPI2 model GE")
+)
 
 results_all %>%
   filter(Stock == "WildSmolts") %>%
@@ -504,95 +327,52 @@ results_all %>%
                format.args = list(big.mark = ","))
 ```
 
-## Forest plot — all stocks
-
 ```{r forest-plot, fig.width=10, fig.height=5}
+pal <- c("A: SCOBI legacy" = "#555555", "B: SCRAPI2 fixed GE" = "#2166ac",
+         "C: SCRAPI2 model GE" = "#d73027")
 results_all %>%
   filter(Stock != "WildSmolts") %>%
-  mutate(Stock = factor(Stock)) %>%
-  ggplot(aes(x = Estimate, xmin = LCI, xmax = UCI, y = Stock, colour = Workflow)) +
+  ggplot(aes(Estimate, factor(Stock), xmin = LCI, xmax = UCI, colour = Workflow)) +
   geom_pointrange(position = position_dodge(width = 0.5), size = 0.6) +
-  scale_colour_manual(values = c("A: SCOBI legacy" = "#555555",
-                                 "B: SCRAPI2 fixed GE" = "#2166ac",
-                                 "C: SCRAPI2 model GE" = "#d73027")) +
-  scale_x_continuous(labels = scales::comma) +
+  scale_colour_manual(values = pal) + scale_x_continuous(labels = comma) +
   labs(title = "Wild steelhead smolts by genetic stock — MY2025",
        x = "Estimated abundance", y = NULL, colour = NULL) +
   theme_minimal(base_size = 13) +
   theme(legend.position = "bottom", axis.text.y = element_text(hjust = 1))
 ```
 
-## CI width comparison — WildSmolts
-
 ```{r ci-width-plot, fig.width=6, fig.height=4}
 results_all %>%
   filter(Stock == "WildSmolts") %>%
   mutate(half_width = (UCI - LCI) / 2, Workflow = fct_inorder(Workflow)) %>%
-  ggplot(aes(x = Workflow, y = half_width, fill = Workflow)) +
-  geom_col(width = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values = c("A: SCOBI legacy" = "#555555",
-                               "B: SCRAPI2 fixed GE" = "#2166ac",
-                               "C: SCRAPI2 model GE" = "#d73027")) +
+  ggplot(aes(Workflow, half_width, fill = Workflow)) +
+  geom_col(width = 0.5, show.legend = FALSE) + scale_fill_manual(values = pal) +
   labs(title = "CI half-width — WildSmolts", x = NULL, y = "Half-width (fish)") +
   theme_minimal(base_size = 13)
 ```
 
-The model-GE CI (Path C) should be wider than the fixed-GE CI (Paths A/B) — the
-extra width is the uncertainty from not knowing GE exactly.
+A ≈ B (SCRAPI ≡ SCRAPI2 with fixed GE); C is wider — the extra width is the GE
+uncertainty the weekly model propagates.
 
 ---
 
 # GSI uncertainty: fixed vs drawn
 
-GE uncertainty widens the **total** wild-smolt CI. GSI uncertainty instead widens
-the **per-stock** CIs: it does not change how many wild smolts there are (rear
-composition and passage are untouched), only how confidently we split them among
-genetic stocks. To isolate the genetic effect we hold GE **fixed**, restrict to
-the genotyped fish, and compare:
-
-| Workflow | Stock assignment | Tool |
-|---|---|---|
-| **Fixed GSI** | observed `GenStock`, treated as known | `SCRAPI2` (`gsiDraws = NULL`) |
-| **Drawn GSI** | GSI posterior draws, one per bootstrap | `SCRAPI2` (`gsiDraws = gsi_draws`) |
-
-## Restrict the trap to genotyped fish
-
-`SCRAPI2` requires every `smoltData` fish to appear in the draws, so we keep only
-trap fish with a posterior (fish without a valid BiosamplesID were not
-genotyped).
-
-```{r gsi-load}
-gsi_ids       <- gsi_draws[[1]]
-STHD.trap.gsi <- STHD.trap[STHD.trap$MasterID %in% gsi_ids, ]
-cat(sprintf("Trap fish: %d total, %d with GSI draws, %d excluded\n",
-            nrow(STHD.trap), nrow(STHD.trap.gsi),
-            nrow(STHD.trap) - nrow(STHD.trap.gsi)))
-dim(gsi_draws)           # n_fish x (n_draws + 1)
-```
-
-## Fixed vs drawn GSI (same fish, same fixed GE)
+GE uncertainty widens the **total** CI; GSI uncertainty widens the **per-stock**
+CIs without changing the total (rear composition and passage are untouched). We
+hold GE fixed, restrict to genotyped fish, and compare fixed (`gsiDraws = NULL`)
+vs drawn (`gsiDraws = gsi_draws`).
 
 ```{r gsi-runs}
-# Fixed GSI: observed GenStock as known
-result_gsi_fixed <- SCRAPI2(
-  smoltData = STHD.trap.gsi, passageData = STHD.FPC, Primary = "GenStock",
-  strat = "Week", dat = "SampleEndDate", tally = "SampleCount",
-  samrate = "SampleRate", guidance = "GuidanceEfficiency", collaps = "Collapse",
-  RTYPE = "W", alph = 0.05, dateFormat = "%m/%d/%Y", Run = "gsifixed_", B = B)
+gsi_ids       <- gsi_draws[[1]]
+STHD.trap.gsi <- STHD.trap[STHD.trap$MasterID %in% gsi_ids, ]
+cat(sprintf("Trap fish: %d total, %d genotyped, %d excluded\n",
+            nrow(STHD.trap), nrow(STHD.trap.gsi), nrow(STHD.trap) - nrow(STHD.trap.gsi)))
 
-# Drawn GSI: posterior draws, one per bootstrap iteration
-result_gsi <- SCRAPI2(
-  smoltData = STHD.trap.gsi, passageData = STHD.FPC, Primary = "GenStock",
-  gsiDraws = gsi_draws, fishID = "MasterID",
-  strat = "Week", dat = "SampleEndDate", tally = "SampleCount",
-  samrate = "SampleRate", guidance = "GuidanceEfficiency", collaps = "Collapse",
-  RTYPE = "W", alph = 0.05, dateFormat = "%m/%d/%Y", Run = "gsidrawn_", B = B)
+result_gsi_fixed <- s2(smoltData = STHD.trap.gsi, Run = "gsifixed_")
+result_gsi       <- s2(smoltData = STHD.trap.gsi, gsiDraws = gsi_draws,
+                       fishID = "MasterID", Run = "gsidrawn_")
 ```
-
-## The total is unchanged; per-stock CIs widen
-
-GSI draws only reassign each fish's stock — not its rear type or the passage
-counts — so the wild **total** (and its CI) is identical between the two runs.
 
 ```{r gsi-total-check}
 cat(sprintf("WildSmolts total  fixed GSI: %s   drawn GSI: %s\n",
@@ -601,107 +381,64 @@ cat(sprintf("WildSmolts total  fixed GSI: %s   drawn GSI: %s\n",
 ```
 
 ```{r gsi-compare-table}
-gsi_tab <- bind_rows(ci_df(result_gsi_fixed$CI, "Fixed"),
-                     ci_df(result_gsi$CI,       "Drawn")) %>%
+bind_rows(ci_df(result_gsi_fixed$CI, "Fixed"), ci_df(result_gsi$CI, "Drawn")) %>%
   filter(Stock != "WildSmolts") %>%
   transmute(Stock, Workflow, Estimate = round(Estimate),
             HalfWidth = round((UCI - LCI) / 2)) %>%
   pivot_wider(names_from = Workflow, values_from = c(Estimate, HalfWidth)) %>%
-  mutate(Width_ratio = round(HalfWidth_Drawn / HalfWidth_Fixed, 2))
-
-knitr::kable(
-  gsi_tab,
-  caption = paste("Per-stock smolts: fixed vs drawn GSI (genotyped fish, GE",
-                  "held fixed). Width_ratio > 1 = genetic uncertainty widens the CI."),
-  format.args = list(big.mark = ","))
+  mutate(Width_ratio = round(HalfWidth_Drawn / HalfWidth_Fixed, 2)) %>%
+  knitr::kable(caption = paste("Per-stock smolts: fixed vs drawn GSI (genotyped",
+               "fish, GE fixed). Width_ratio > 1 = genetic uncertainty widens the CI."),
+               format.args = list(big.mark = ","))
 ```
 
 ```{r gsi-forest, fig.width=10, fig.height=5}
-bind_rows(ci_df(result_gsi_fixed$CI, "Fixed GSI"),
-          ci_df(result_gsi$CI,       "Drawn GSI")) %>%
+bind_rows(ci_df(result_gsi_fixed$CI, "Fixed GSI"), ci_df(result_gsi$CI, "Drawn GSI")) %>%
   filter(Stock != "WildSmolts") %>%
-  ggplot(aes(x = Estimate, y = Stock, xmin = LCI, xmax = UCI, colour = Workflow)) +
+  ggplot(aes(Estimate, factor(Stock), xmin = LCI, xmax = UCI, colour = Workflow)) +
   geom_pointrange(position = position_dodge(width = 0.5), size = 0.6) +
   scale_colour_manual(values = c("Fixed GSI" = "#2166ac", "Drawn GSI" = "#d73027")) +
-  scale_x_continuous(labels = scales::comma) +
+  scale_x_continuous(labels = comma) +
   labs(title = "Per-stock smolts: fixed vs drawn GSI (GE fixed) — MY2025",
        x = "Estimated abundance", y = NULL, colour = NULL) +
   theme_minimal(base_size = 13) +
   theme(legend.position = "bottom", axis.text.y = element_text(hjust = 1))
 ```
 
-The wild **total** matches between the two runs while the **per-stock** CIs are
-wider under drawn GSI — `Width_ratio > 1` quantifies the genetic uncertainty
-added per stock. GE and GSI draws can be supplied together for full propagation
-(`geDraws = ...` **and** `gsiDraws = ...` in one call). These per-stock totals are
-on the genotyped subset, so they need not match the full-trap GE comparison.
+The total matches; per-stock CIs widen under drawn GSI (`Width_ratio > 1`). GE and
+GSI draws can be supplied together for full propagation. These subset totals need
+not match the full-trap GE comparison above.
 
 ---
 
 # Control checks (pathway neutrality)
 
-Both the `geDraws` and `gsiDraws` pathways must be **numerically neutral** when
-the draws carry no uncertainty — the strict identity test that SCRAPI2 did not
-alter the SCRAPI arithmetic.
-
-## Exact-GE draws
-
-Every draw equals the fixed NOAA GE; with `gsiDraws = NULL` the estimate must
-match the fixed-GE run to within bootstrap noise.
+Both draw pathways must be numerically neutral when the draws carry no
+uncertainty — the strict identity test.
 
 ```{r control-exact-ge, results='hold'}
+# Exact-GE: every draw equals the fixed NOAA GE -> must match the fixed-GE run.
 ge0 <- pmin(pmax(as.numeric(STHD.FPC$GuidanceEfficiency), 1e-6), 1 - 1e-6)
-ge_draws_exact <- data.frame(
-  SampleEndDate = STHD.FPC$SampleEndDate,
-  matrix(rep(ge0, B), nrow = length(ge0), ncol = B), check.names = FALSE)
-
-result_exact <- SCRAPI2(
-  smoltData = STHD.trap, passageData = STHD.FPC, geDraws = ge_draws_exact,
-  Primary = "GenStock", strat = "Week", dat = "SampleEndDate", tally = "SampleCount",
-  samrate = "SampleRate", guidance = "GuidanceEfficiency", collaps = "Collapse",
-  RTYPE = "W", alph = 0.05, dateFormat = "%m/%d/%Y", Run = "exact_", B = B)
-
-est_fixed <- result_fixed$CI["WildSmolts", "Estimate"]
-est_exact <- result_exact$CI["WildSmolts", "Estimate"]
-cat(sprintf("Fixed GE: %s   exact-draw: %s   diff: %.2f%%\n",
-            format(est_fixed, big.mark = ","), format(est_exact, big.mark = ","),
-            abs(est_fixed - est_exact) / est_fixed * 100))
-stopifnot(abs(est_fixed - est_exact) / est_fixed < 0.01)
+ge_exact <- data.frame(SampleEndDate = STHD.FPC$SampleEndDate,
+                       matrix(rep(ge0, B), nrow = length(ge0), ncol = B),
+                       check.names = FALSE)
+result_exact <- s2(smoltData = STHD.trap, geDraws = ge_exact, Run = "exact_")
+d_ge <- abs(result_fixed$CI["WildSmolts","Estimate"] - result_exact$CI["WildSmolts","Estimate"]) /
+        result_fixed$CI["WildSmolts","Estimate"]
+cat(sprintf("Exact-GE control  WildSmolts diff: %.2f%%\n", 100 * d_ge))
+stopifnot(d_ge < 0.01)
 ```
 
-## Degenerate GSI draws
-
-`sim_gsi_draws(method = "fixed")` repeats the **observed** `GenStock` in every
-column — real assignments, no genetic uncertainty — so it must reproduce the
-`gsiDraws = NULL` run (`result_gsi_fixed`). Same genotyped subset.
-
-```{r control-fixed-gsi, results='hold'}
-gsi_degen <- sim_gsi_draws(STHD.trap.gsi, Primary = "GenStock",
-                           fishID = "MasterID", B = B, method = "fixed")
-
-result_gsi_degen <- SCRAPI2(
-  smoltData = STHD.trap.gsi, passageData = STHD.FPC, gsiDraws = gsi_degen,
-  fishID = "MasterID", Primary = "GenStock",
-  strat = "Week", dat = "SampleEndDate", tally = "SampleCount",
-  samrate = "SampleRate", guidance = "GuidanceEfficiency", collaps = "Collapse",
-  RTYPE = "W", alph = 0.05, dateFormat = "%m/%d/%Y", Run = "gsidegen_", B = B)
-
-gsi_ctrl <- merge(
-  data.frame(Stock = rownames(result_gsi_fixed$CI), null_est = result_gsi_fixed$CI[, "Estimate"]),
-  data.frame(Stock = rownames(result_gsi_degen$CI), degen_est = result_gsi_degen$CI[, "Estimate"]),
-  by = "Stock")
-gsi_ctrl$pct_diff <- round(abs(gsi_ctrl$null_est - gsi_ctrl$degen_est) /
-                             pmax(gsi_ctrl$null_est, 1) * 100, 2)
-knitr::kable(gsi_ctrl,
-             caption = "GSI pathway control: gsiDraws = NULL vs degenerate (observed-stock) draws",
-             format.args = list(big.mark = ","))
-
-w_null  <- result_gsi_fixed$CI["WildSmolts", "Estimate"]
-w_degen <- result_gsi_degen$CI["WildSmolts", "Estimate"]
-cat(sprintf("WildSmolts  null: %s   degenerate-draw: %s   diff: %.2f%%\n",
-            format(w_null, big.mark = ","), format(w_degen, big.mark = ","),
-            abs(w_null - w_degen) / w_null * 100))
-stopifnot(abs(w_null - w_degen) / w_null < 0.01)
+```{r control-degenerate-gsi, results='hold'}
+# Degenerate-GSI: observed GenStock repeated as draws -> must match gsiDraws = NULL.
+gsi_degen <- sim_gsi_draws(STHD.trap.gsi, Primary = "GenStock", fishID = "MasterID",
+                           B = B, method = "fixed")
+result_gsi_degen <- s2(smoltData = STHD.trap.gsi, gsiDraws = gsi_degen,
+                       fishID = "MasterID", Run = "gsidegen_")
+d_gsi <- abs(result_gsi_fixed$CI["WildSmolts","Estimate"] - result_gsi_degen$CI["WildSmolts","Estimate"]) /
+         result_gsi_fixed$CI["WildSmolts","Estimate"]
+cat(sprintf("Degenerate-GSI control  WildSmolts diff: %.2f%%\n", 100 * d_gsi))
+stopifnot(d_gsi < 0.01)
 ```
 
 ---
@@ -710,15 +447,13 @@ stopifnot(abs(w_null - w_degen) / w_null < 0.01)
 
 | Check | Expected result |
 |---|---|
-| `gelman.diag()` R-hat (psi, alpha, beta, sigma_psi; + p/phi, mu_strat if nested) | < 1.05 for all monitored parameters |
-| GE draws range | All values in \[0, 1\] |
-| Stratum GE vs NOAA | Model GE generally below NOAA at high spill (post-ROD) |
-| **Path A vs Path B point estimates** | **Within ~5% (bootstrap noise, same seed) — SCRAPI ≡ SCRAPI2** |
-| **Exact-GE control check** | **< 1% difference in WildSmolts estimate — geDraws pathway is neutral** |
-| **Degenerate-GSI control** | **< 1% difference in WildSmolts estimate — gsiDraws pathway is neutral** |
-| Path C CI half-width vs Path B | Wider or equal — never narrower (GE uncertainty) |
-| Fixed vs drawn GSI: WildSmolts total | Matches within bootstrap noise (GSI doesn't change the total) |
-| Fixed vs drawn GSI: per-stock CIs | Wider under drawn GSI (`Width_ratio` > 1) |
-| Weekly + nested fit (if used) | Data-rich weeks unchanged; sparse weeks shrink toward stratum mean |
+| `gelman.diag()` R-hat (psi, mu_strat, alpha, beta, sigma_psi/strat) | < 1.05 for all |
+| GE draws range | All in \[0, 1\] |
+| Stratum-guided weekly GE plot | Weekly GE shrinks toward its collapse-stratum line; data-rich weeks barely move, sparse weeks pulled toward the parent; both below NOAA at high spill |
+| **Path A vs Path B** | **WildSmolts within ~5% (bootstrap noise) — SCRAPI ≡ SCRAPI2** |
+| **Exact-GE control** | **< 1% WildSmolts difference — geDraws pathway neutral** |
+| **Degenerate-GSI control** | **< 1% WildSmolts difference — gsiDraws pathway neutral** |
+| Path C CI vs Path B | Wider or equal (GE uncertainty) |
+| Fixed vs drawn GSI | Total unchanged; per-stock CIs wider (`Width_ratio` > 1) |
 
 ---
