@@ -562,11 +562,115 @@ difference is the additional uncertainty from not knowing GE exactly.
 
 ---
 
-# Control check (exact-GE draws)
+# GSI uncertainty: fixed vs drawn
 
-This is the strict identity test: build a `geDraws` matrix in which **every draw
-equals the fixed NOAA GE**. With no GE variability and `gsiDraws = NULL`, the
-`geDraws` pathway must be numerically neutral — point estimates agree to within
+GE uncertainty (above) widens the **total** wild-smolt CI. GSI uncertainty
+instead widens the **per-stock** CIs: it does not change how many wild smolts
+there are, only how confidently we split them among genetic stocks. To isolate
+the genetic effect we hold GE **fixed** (the NOAA table) and compare:
+
+| Workflow | Stock assignment | Tool |
+|---|---|---|
+| **Fixed GSI** | observed `GenStock`, treated as known | `SCRAPI2` (`gsiDraws = NULL`) |
+| **Drawn GSI** | posterior draws, one per bootstrap | `SCRAPI2` (`gsiDraws = ...`) |
+
+## Build GSI draws
+
+Real genetics-lab draws plug in directly — one column per posterior sample, one
+row per fish, keyed by `MasterID` (the EASE adult format). While they are
+pending, `sim_gsi_draws()` produces a placeholder in that exact layout. The
+`"dirichlet"` method perturbs each fish's assignment around its observed stock
+(higher `alpha_self` = more genetic confidence; lower = more uncertainty).
+
+```{r gsi-draws}
+gsi_sim <- sim_gsi_draws(
+  STHD.trap, Primary = "GenStock", fishID = "MasterID",
+  B = B, method = "dirichlet", alpha_self = 10, alpha_other = 1, seed = 123
+)
+dim(gsi_sim)             # n_fish x (B + 1): MasterID + boot_1 .. boot_B
+gsi_sim[1:3, 1:4]
+```
+
+## Run with drawn GSI (GE held fixed)
+
+```{r gsi-drawn-run}
+result_gsi <- SCRAPI2(
+  smoltData   = STHD.trap,
+  passageData = sthd_fpc_fixed_ge,   # same fixed NOAA GE as Path B
+  strata      = sthd_strata,
+  gsiDraws    = gsi_sim,
+  fishID      = "MasterID",
+  Primary     = "GenStock",
+  dateFormat  = "%Y-%m-%d",
+  Run         = "gsi_",
+  B           = B
+)
+```
+
+`result_fixed` (Path B) is the **fixed-GSI** run — identical inputs except it
+treats `GenStock` as known. So the only difference between the two is genetic
+uncertainty.
+
+## The total is unchanged; per-stock CIs widen
+
+```{r gsi-total-check}
+cat(sprintf("WildSmolts total  fixed GSI: %s   drawn GSI: %s\n",
+            format(result_fixed$CI["WildSmolts", "Estimate"], big.mark = ","),
+            format(result_gsi$CI["WildSmolts",   "Estimate"], big.mark = ",")))
+```
+
+```{r gsi-compare-table}
+gsi_tab <- bind_rows(
+  ci_df(result_fixed$CI, "Fixed"),
+  ci_df(result_gsi$CI,   "Drawn")
+) %>%
+  filter(Stock != "WildSmolts") %>%
+  transmute(Stock, Workflow, Estimate = round(Estimate),
+            HalfWidth = round((UCI - LCI) / 2)) %>%
+  pivot_wider(names_from = Workflow, values_from = c(Estimate, HalfWidth)) %>%
+  mutate(Width_ratio = round(HalfWidth_Drawn / HalfWidth_Fixed, 2))
+
+knitr::kable(
+  gsi_tab,
+  caption = paste("Per-stock smolts: fixed vs drawn GSI (GE held fixed).",
+                  "Width_ratio > 1 means genetic uncertainty widens the CI."),
+  format.args = list(big.mark = ",")
+)
+```
+
+```{r gsi-forest, fig.width=10, fig.height=5}
+bind_rows(ci_df(result_fixed$CI, "Fixed GSI"),
+          ci_df(result_gsi$CI,   "Drawn GSI")) %>%
+  filter(Stock != "WildSmolts") %>%
+  ggplot(aes(x = Estimate, y = Stock, xmin = LCI, xmax = UCI, colour = Workflow)) +
+  geom_pointrange(position = position_dodge(width = 0.5), size = 0.6) +
+  scale_colour_manual(values = c("Fixed GSI" = "#2166ac",
+                                 "Drawn GSI" = "#d73027")) +
+  scale_x_continuous(labels = scales::comma) +
+  labs(title  = "Per-stock smolts: fixed vs drawn GSI (GE fixed) — MY2025",
+       x = "Estimated abundance", y = NULL, colour = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", axis.text.y = element_text(hjust = 1))
+```
+
+The wild-smolt **total** matches between the two runs (genetics only
+redistributes composition), while the **per-stock** CIs are wider under drawn
+GSI — `Width_ratio > 1` quantifies the genetic uncertainty added to each stock.
+GE and GSI draws can be supplied together for full uncertainty propagation
+(`geDraws = ...` **and** `gsiDraws = ...` in one call).
+
+---
+
+# Control checks (pathway neutrality)
+
+Both the `geDraws` and `gsiDraws` pathways must be **numerically neutral** when
+the draws carry no uncertainty — this is the strict identity test that SCRAPI2
+has not altered the SCRAPI estimation arithmetic.
+
+## Exact-GE draws
+
+Build a `geDraws` matrix in which **every draw equals the fixed NOAA GE**. With
+no GE variability and `gsiDraws = NULL`, point estimates must agree to within
 bootstrap noise and CI width is essentially identical to the fixed-GE run.
 
 ```{r control-exact-ge, results='hold'}
@@ -601,6 +705,52 @@ cat(sprintf("Difference         : %.2f%%\n",
 stopifnot(abs(est_fixed - est_exact) / est_fixed < 0.01)
 ```
 
+## Fixed-method GSI draws
+
+`sim_gsi_draws(method = "fixed")` repeats the observed stock in every column, so
+it carries no genetic uncertainty. Feeding it to `gsiDraws` must reproduce the
+`gsiDraws = NULL` run — proving the GSI pathway is neutral when the draws are
+degenerate. The wild total must match to within bootstrap noise; per-stock
+estimates are shown for inspection.
+
+```{r control-fixed-gsi, results='hold'}
+gsi_fixed <- sim_gsi_draws(STHD.trap, Primary = "GenStock", fishID = "MasterID",
+                           B = B, method = "fixed")
+
+result_gsi_fixed <- SCRAPI2(
+  smoltData   = STHD.trap,
+  passageData = sthd_fpc_fixed_ge,
+  strata      = sthd_strata,
+  gsiDraws    = gsi_fixed,
+  fishID      = "MasterID",
+  Primary     = "GenStock",
+  dateFormat  = "%Y-%m-%d",
+  Run         = "gsifix_",
+  B           = B
+)
+
+gsi_ctrl <- merge(
+  data.frame(Stock = rownames(result_fixed$CI),
+             null_est = result_fixed$CI[, "Estimate"]),
+  data.frame(Stock = rownames(result_gsi_fixed$CI),
+             fixed_est = result_gsi_fixed$CI[, "Estimate"]),
+  by = "Stock"
+)
+gsi_ctrl$pct_diff <- round(abs(gsi_ctrl$null_est - gsi_ctrl$fixed_est) /
+                             pmax(gsi_ctrl$null_est, 1) * 100, 2)
+knitr::kable(gsi_ctrl,
+             caption = "Fixed-method GSI control: gsiDraws = NULL vs method = 'fixed'",
+             format.args = list(big.mark = ","))
+
+# Wild total must agree to within bootstrap noise
+w_null  <- result_fixed$CI["WildSmolts", "Estimate"]
+w_fixed <- result_gsi_fixed$CI["WildSmolts", "Estimate"]
+cat(sprintf("WildSmolts  null: %s   fixed-draw: %s   diff: %.2f%%\n",
+            format(w_null, big.mark = ","), format(w_fixed, big.mark = ","),
+            abs(w_null - w_fixed) / w_null * 100))
+stopifnot(abs(w_null - w_fixed) / w_null < 0.01)
+```
+
 ---
 
 # Reviewer checklist
@@ -612,7 +762,10 @@ stopifnot(abs(est_fixed - est_exact) / est_fixed < 0.01)
 | Stratum GE vs NOAA | Model GE generally below NOAA at high spill (post-ROD) |
 | **Path A vs Path B point estimates** | **Within ~5% (bootstrap noise, same seed) — SCRAPI ≡ SCRAPI2** |
 | **Exact-GE control check** | **< 1% difference in WildSmolts estimate — geDraws pathway is neutral** |
-| Path C CI half-width vs Path B | Wider or equal — never narrower |
+| **Fixed-method GSI control** | **< 1% difference in WildSmolts estimate — gsiDraws pathway is neutral** |
+| Path C CI half-width vs Path B | Wider or equal — never narrower (GE uncertainty) |
+| Fixed vs drawn GSI: WildSmolts total | Matches within bootstrap noise (GSI doesn't change the total) |
+| Fixed vs drawn GSI: per-stock CIs | Wider under drawn GSI (`Width_ratio` > 1) |
 | Weekly + nested fit (if used) | Data-rich weeks unchanged; sparse weeks shrink toward stratum mean |
 
 ---
