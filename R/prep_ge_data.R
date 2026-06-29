@@ -31,6 +31,15 @@
 #'     \item \strong{Date format}: columns \code{date} (Date), \code{stratum},
 #'       and \code{stratum_idx} (integer, 1-based, monotonically increasing).
 #'   }
+#' @param parent_strata optional two-column data frame giving a coarser parent
+#'   grouping for a nested (two-level) GE fit. The first column must match the
+#'   stratum ids produced here (i.e. the \code{Collapse}/stratum value used in
+#'   \code{strat_assign}; for a weekly run that is the week number), the second
+#'   column is the parent group id (e.g. the collapse-stratum). When supplied, a
+#'   \code{parent} column is added to the output and \code{\link{fit_ge_model}}
+#'   shrinks each stratum's psi toward its parent group's mean. Pass your
+#'   Week/Collapse table here when running weekly. Default \code{NULL}
+#'   (single-level fit).
 #' @param spill_data data frame of daily LGR spill values. Required columns:
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric, percentage).
 #' @param lgs_spill_data data frame of daily LGS spill values. Required columns:
@@ -65,7 +74,8 @@ prep_ge_data <- function(dat_up,
                                               "PD5","PD6","PD7","PD8","PDW",
                                               "ICH","PDO","ESANIS","TTOWER",
                                               "ASMEBR","PIER3","MLRSNI",
-                                              "LMILIS","FOUNDI","CRESIS")) {
+                                              "LMILIS","FOUNDI","CRESIS"),
+                         parent_strata    = NULL) {
 
   species <- match.arg(species, c("chnk", "sthd"))
 
@@ -225,7 +235,7 @@ prep_ge_data <- function(dat_up,
   }
 
   # Combine all stratum summaries
-  full_join(psi_pool, lgr_counts, by = "stratum") %>%
+  ge_out <- full_join(psi_pool, lgr_counts, by = "stratum") %>%
     left_join(hist_counts,  by = "stratum") %>%
     left_join(spill_strat,  by = "stratum") %>%
     left_join(lgs_strat,    by = "stratum") %>%
@@ -235,4 +245,21 @@ prep_ge_data <- function(dat_up,
       n_total_GRS = n_GRS_obs / psi
     ) %>%
     arrange(stratum_idx)
+
+  # Attach parent grouping for a nested fit. The parent table's first column
+  # matches the stratum id; the second is the parent group. Strata with no
+  # match are placed in their own singleton parent (so they are never pooled
+  # into an unrelated group).
+  if (!is.null(parent_strata)) {
+    pmap   <- as.data.frame(parent_strata)
+    praw   <- pmap[[2]][match(ge_out$stratum, pmap[[1]])]
+    if (anyNA(praw)) {
+      warning(sum(is.na(praw)), " stratum/strata have no row in 'parent_strata';",
+              " each is placed in its own parent group.")
+      praw[is.na(praw)] <- paste0("_solo_", ge_out$stratum[is.na(praw)])
+    }
+    ge_out$parent <- as.integer(factor(praw, levels = unique(praw)))
+  }
+
+  ge_out
 }
