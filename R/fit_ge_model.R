@@ -21,9 +21,31 @@
 #'   prevent the multinomial likelihood from collapsing the posterior in
 #'   data-rich strata (following data-thinning approach of McCann et al. 2023).
 #'
+#'   The model is hierarchical: every stratum's \code{logit(psi)} is drawn from
+#'   the shared spill regression plus process error, so strata may be defined as
+#'   finely as individual weeks. Weeks with sparse PIT data are partially pooled
+#'   toward the regression, and weeks with no detection-history data contribute
+#'   no likelihood term but still receive a regression-based psi (their draws are
+#'   completed in \code{\link{generate_ge_draws}}). To estimate GE weekly, pass a
+#'   \code{strat_assign} to \code{\link{prep_ge_data}} in which \code{Collapse}
+#'   equals \code{Week} (one stratum per week).
+#'
+#'   \strong{Nested (two-level) shrinkage.} When \code{ge_data} carries a
+#'   \code{parent} column (added by \code{\link{prep_ge_data}} via its
+#'   \code{parent_strata} argument), the model becomes nested: each stratum's
+#'   \code{logit(psi)} shrinks toward its \emph{parent} group's mean
+#'   (\code{mu_strat}), and the parent means shrink toward the global mean
+#'   \code{alpha}. With weeks nested in collapse strata this means a sparse week
+#'   borrows strength from its collapse stratum rather than being estimated in
+#'   isolation -- removing the high-leverage "near-zero GE from a handful of
+#'   fish" behaviour, fully data-driven (no floor). Without a \code{parent}
+#'   column the original single-level model is used unchanged.
+#'
 #' @param ge_data data frame returned by \code{\link{prep_ge_data}}. Must
 #'   contain columns \code{stratum_idx}, \code{n_GRJ_obs}, \code{n_GRS_obs},
-#'   \code{n_pool}, \code{spill_val}, and \code{lgs_spill_val}.
+#'   \code{n_pool}, \code{spill_val}, and \code{lgs_spill_val}. An optional
+#'   \code{parent} column (integer parent-group id per stratum) triggers the
+#'   nested model.
 #' @param max_n integer. Maximum effective sample size per stratum for the
 #'   multinomial likelihood. Counts are scaled proportionally if N_seen > max_n.
 #'   Default 300.
@@ -38,7 +60,9 @@
 #'     \code{psi[1..S]}, \code{p[1..S]}, \code{phi[1..S]},
 #'     \code{alpha} (= alpha_psi), \code{beta} (= beta_psi),
 #'     \code{sigma_psi}, \code{alpha_p}, \code{beta_p}, \code{sigma_p},
-#'     \code{alpha_phi}, \code{beta_phi}, \code{sigma_phi}}
+#'     \code{alpha_phi}, \code{beta_phi}, \code{sigma_phi}; plus
+#'     \code{mu_strat[1..n_strat]} and \code{sigma_strat} when the nested
+#'     model is used}
 #'   \item{ge_data}{the input \code{ge_data} (passed through)}
 #'   \item{obs_strata}{subset of \code{ge_data} with \code{n_pool > 0}}
 #'   \item{spill_mean}{mean of \code{spill_val} used for standardisation}
@@ -94,19 +118,48 @@ fit_ge_model <- function(ge_data,
   # Build history count matrix and cap N_seen
   n_mat <- as.matrix(obs_strata[, c("n_h1","n_h2","n_h3","n_h4","n_h5")])
   N_seen <- rowSums(n_mat)
-  scale  <- pmin(1, max_n / N_seen)
+  scale  <- ifelse(N_seen > 0, pmin(1, max_n / N_seen), 1)
   n_mat  <- round(sweep(n_mat, 1, scale, "*"))
   N_seen <- rowSums(n_mat)
 
+  # Strata with detection-history data enter the multinomial likelihood. Strata
+  # with none (possible when estimating weekly with sparse PIT data) still get a
+  # hierarchical psi from the spill regression + process error, but contribute
+  # no likelihood term -- this keeps low-data weeks estimable via partial
+  # pooling rather than dropping or breaking them.
+  lik_idx <- which(N_seen > 0)
+  S_lik   <- length(lik_idx)
+  if (S_lik == 0)
+    stop("No strata have detection-history data (all N_seen == 0).")
+
+  # Nested hierarchy: a 'parent' column (e.g. weeks nested in collapse strata)
+  # makes each stratum's logit(psi) shrink toward its parent group's mean rather
+  # than the global regression, so sparse weeks borrow strength from their
+  # collapse stratum instead of being estimated alone.
+  nested <- "parent" %in% names(obs_strata) &&
+            length(unique(obs_strata$parent)) > 1
+  if (nested) {
+    parent_obs <- as.integer(factor(obs_strata$parent,
+                                    levels = sort(unique(obs_strata$parent))))
+    n_strat    <- max(parent_obs)
+  }
+
   jags_data <- list(
     S             = S,
+    S_lik         = S_lik,
+    lik_idx       = as.array(lik_idx),
     n             = n_mat,
     N_seen        = N_seen,
     lgr_spill_std = as.numeric(lgr_spill_std),
     lgs_spill_std = as.numeric(lgs_spill_std)
   )
+  if (nested) {
+    jags_data$parent  <- as.array(parent_obs)
+    jags_data$n_strat <- n_strat
+  }
 
-  model_string <- "
+  # Shared portion of the JAGS model (detection cells, likelihood, p/phi priors)
+  model_flat <- "
   model {
 
     eps     <- 1.0E-9
@@ -137,8 +190,11 @@ fit_ge_model <- function(ge_data,
       for (k in 1:5) {
         pi_obs[s, k] <- pi_raw[s, k] / p_seen[s]
       }
+    }
 
-      n[s, 1:5] ~ dmulti(pi_obs[s, 1:5], N_seen[s])
+    # multinomial likelihood only for strata with detection-history data
+    for (j in 1:S_lik) {
+      n[lik_idx[j], 1:5] ~ dmulti(pi_obs[lik_idx[j], 1:5], N_seen[lik_idx[j]])
     }
 
     # psi (GE): named alpha/beta to match generate_ge_draws expectations
@@ -156,6 +212,76 @@ fit_ge_model <- function(ge_data,
     sigma_phi ~ dunif(0.05, 1)
   }"
 
+  # Nested variant: logit(psi) shrinks to a parent-group mean (mu_strat), which
+  # in turn shrinks to the global mean alpha. Identical detection model.
+  model_nested <- "
+  model {
+
+    eps       <- 1.0E-9
+    tau_psi   <- pow(sigma_psi,   -2)
+    tau_strat <- pow(sigma_strat, -2)
+    tau_p     <- pow(sigma_p,     -2)
+    tau_phi   <- pow(sigma_phi,   -2)
+
+    for (s in 1:S) {
+
+      logit_psi[s] ~ dnorm(mu_strat[parent[s]] + beta * lgr_spill_std[s], tau_psi)
+      psi[s] <- ilogit(logit_psi[s])
+
+      logit_p[s] ~ dnorm(alpha_p + beta_p * lgr_spill_std[s], tau_p)
+      p[s] <- ilogit(logit_p[s])
+
+      logit_phi[s] ~ dnorm(alpha_phi + beta_phi * lgs_spill_std[s], tau_phi)
+      phi[s] <- ilogit(logit_phi[s])
+
+      pi_raw[s, 1] <- psi[s] * (1 - phi[s])               + eps
+      pi_raw[s, 2] <- psi[s] * phi[s]                     + eps
+      pi_raw[s, 3] <- (1 - psi[s]) * p[s] * (1 - phi[s])  + eps
+      pi_raw[s, 4] <- (1 - psi[s]) * p[s] * phi[s]        + eps
+      pi_raw[s, 5] <- (1 - psi[s]) * (1 - p[s]) * phi[s]  + eps
+
+      p_seen[s] <- pi_raw[s,1] + pi_raw[s,2] + pi_raw[s,3] +
+                   pi_raw[s,4] + pi_raw[s,5]
+
+      for (k in 1:5) {
+        pi_obs[s, k] <- pi_raw[s, k] / p_seen[s]
+      }
+    }
+
+    # multinomial likelihood only for strata with detection-history data
+    for (j in 1:S_lik) {
+      n[lik_idx[j], 1:5] ~ dmulti(pi_obs[lik_idx[j], 1:5], N_seen[lik_idx[j]])
+    }
+
+    # psi (GE): nested -- stratum (e.g. week) means shrink to parent group means,
+    # parent means shrink to the global mean alpha. beta is the within-group
+    # (e.g. daily/weekly) spill slope, named to match generate_ge_draws.
+    for (g in 1:n_strat) {
+      mu_strat[g] ~ dnorm(alpha, tau_strat)
+    }
+    alpha       ~ dt(0, pow(2, -2), 7)
+    beta        ~ dt(0, pow(1, -2), 7) T(, 0)
+    sigma_psi   ~ dunif(0.05, 3)
+    sigma_strat ~ dunif(0.05, 3)
+
+    alpha_p  ~ dt(0, pow(2, -2), 7)
+    beta_p   ~ dt(0, pow(1, -2), 7)
+    sigma_p  ~ dunif(0.05, 3)
+
+    # Informative priors from McCann et al. (2023) Table 8.3 LGS steelhead
+    alpha_phi ~ dnorm(-2.60, pow(0.30, -2))
+    beta_phi  ~ dnorm(-1.78, pow(0.25, -2)) T(, 0)
+    sigma_phi ~ dunif(0.05, 1)
+  }"
+
+  model_string <- if (nested) model_nested else model_flat
+
+  monitor <- c("psi", "p", "phi",
+               "alpha", "beta", "sigma_psi",
+               "alpha_p", "beta_p", "sigma_p",
+               "alpha_phi", "beta_phi", "sigma_phi")
+  if (nested) monitor <- c(monitor, "mu_strat", "sigma_strat")
+
   set.seed(seed)
   jags_fit <- rjags::jags.model(
     textConnection(model_string),
@@ -167,10 +293,7 @@ fit_ge_model <- function(ge_data,
 
   samples <- rjags::coda.samples(
     jags_fit,
-    variable.names = c("psi", "p", "phi",
-                       "alpha", "beta", "sigma_psi",
-                       "alpha_p", "beta_p", "sigma_p",
-                       "alpha_phi", "beta_phi", "sigma_phi"),
+    variable.names = monitor,
     n.iter = n_iter,
     thin   = n_thin
   )
