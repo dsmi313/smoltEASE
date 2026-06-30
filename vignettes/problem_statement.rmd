@@ -1,0 +1,366 @@
+---
+title: "A multistate guidance-efficiency model for Lower Granite juvenile abundance"
+subtitle: "Model description — GE estimation under post-ROD spill"
+author: "David Smith, IDFG Wild Salmon and Steelhead Program"
+date: "`r format(Sys.Date(), '%B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    fig_width: 10
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(knitr)
+library(ISOweek)
+
+input_dir <- "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/SCRAPI/SCRAPI2/Tim Meet"
+```
+
+This note documents a guidance-efficiency (GE) model for Lower Granite Dam (LGR)
+juvenile abundance and is circulated for comment. It is **methods only** — it
+describes the problem, the multistate model (including the complete JAGS
+specification), and the equation that converts the model's stratum-level
+estimates into daily GE. No abundance results are shown.
+
+---
+
+## The GE problem
+
+SCRAPI estimates total juvenile passage at LGR by expanding the daily juvenile
+bypass system (JBS) trap sample by the daily guidance efficiency — the fraction
+of outmigrants that enter the JBS:
+
+$$N_i = \frac{c_i}{r_i \cdot \widehat{GE}_i}, \qquad \hat{N} = \sum_{i=1}^{S} N_i$$
+
+$c_i$ is the trap count, $r_i$ the trap sampling rate, and $\widehat{GE}_i$ the
+GE on day $i$. Because the expansion is $1/GE$, GE is the most consequential and
+the most uncertain input. GE is strongly **negatively** correlated with spill —
+spillway fish bypass the JBS entirely — and under the 2020 Record of Decision LGR
+now runs at **80–85% spill** through the April–May steelhead peak.
+
+The GE values SCRAPI currently uses come from NOAA NWFSC via the Sandford and
+Smith (2002) mark–recapture framework, developed under **pre-ROD, low-spill**
+conditions. At 80–85% spill that framework is extrapolating well outside the
+range it was fit on.
+
+---
+
+## Current GE is likely too high
+
+The figure below compares, by week for MY2025 wild steelhead, the current NOAA
+GE against (i) the McCann et al. (2023, Table 8.3) spill-dependent bypass-passage
+logit model, and (ii) a direct PIT-based GE computed from GRJ (bypass) and GRS
+(spillbay-1) detection counts under two assumed GRS detection probabilities
+(0.50, 0.25; see next section). It is shown only to motivate the model: through
+the high-spill period the NOAA GE sits near 13%, well above every other line.
+
+```{r load-data}
+# NOAA weekly GE (already merged into the FPC passage file)
+STHD.FPC <- read.csv(file.path(input_dir, "MY2025STHDsmolts_FPCdata_strata_added.csv"))
+STHD.FPC$SampleEndDate <- format(as.Date(STHD.FPC$SampleEndDate, "%m/%d/%Y"), "%m/%d/%Y")
+
+# Direct PIT GRJ/GRS first-detection counts by ISO week
+pit <- read_csv(file.path(input_dir, "MY25_STHD.csv")) |>
+  mutate(site = str_extract(`Site Name`, "^[A-Z]+"),
+         obs_date = as_date(parse_date_time(`Obs Time Value`,
+                            orders = c("mdy HM", "mdy HMS", "mdy HMSp")))) |>
+  filter(site %in% c("GRJ", "GRS"),
+         obs_date >= ymd("2025-03-01"), obs_date < ymd("2025-08-01")) |>
+  group_by(`Tag Code`, site) |> slice_min(obs_date, with_ties = FALSE) |> ungroup() |>
+  mutate(Week = isoweek(obs_date)) |> count(Week, site) |>
+  pivot_wider(names_from = site, values_from = n, values_fill = 0) |>
+  rename(n_grj = GRJ, n_grs = GRS) |>
+  mutate(GE_pit_d50 = replace_na(n_grj / (n_grj + n_grs / 0.50), 0),
+         GE_pit_d25 = replace_na(n_grj / (n_grj + n_grs / 0.25), 0))
+
+# Weekly spill (DART) for the McCann curve and the spill bars
+dart <- read_csv(file.path(input_dir, "DART Spill.csv")) |>
+  mutate(date = mdy(date),
+         spill_per = as.numeric(spill_kcfs) / as.numeric(outflow_kcfs) * 100,
+         outflow_kcfs = as.numeric(outflow_kcfs)) |>
+  filter(date >= ymd("2025-03-01"), date < ymd("2025-08-01")) |>
+  mutate(Week = isoweek(date)) |>
+  group_by(Week) |>
+  summarise(spill_per = replace_na(mean(spill_per, na.rm = TRUE), 0),
+            outflow_kcfs = mean(outflow_kcfs, na.rm = TRUE), .groups = "drop")
+```
+
+```{r ge-plot, fig.cap="Weekly GE for MY2025 wild steelhead. Black: current NOAA GE. Green: McCann et al. (2023) logit (comparison only). Blue/pink: direct PIT-based GE assuming 50% / 25% GRS detection. Bars: weekly mean spill proportion. The multistate model's GE is intentionally not shown here."}
+wk_date <- function(w) ISOweek2date(paste0("2025-W", str_pad(w, 2, pad = "0"), "-1"))
+
+css_ge  <- dart |>   # McCann logit, Weir = 1 (SSW in operation)
+  mutate(GE_css = plogis(0.85 + 0.01066*(outflow_kcfs - 24) - 0.08227*spill_per - 0.34165*1)) |>
+  select(Week, GE_css)
+ge_noaa <- STHD.FPC |> group_by(Week) |>
+  summarise(GE_noaa = mean(GuidanceEfficiency, na.rm = TRUE), .groups = "drop")
+
+ge_lines <- ge_noaa |>
+  left_join(css_ge, by = "Week") |>
+  left_join(pit |> select(Week, GE_pit_d50, GE_pit_d25), by = "Week") |>
+  mutate(week_start = wk_date(Week)) |>
+  pivot_longer(c(GE_noaa, GE_css, GE_pit_d50, GE_pit_d25),
+               names_to = "method", values_to = "GE") |>
+  mutate(method = recode(method,
+    GE_noaa = "Current (NOAA) GE", GE_css = "McCann et al. (2023) logit",
+    GE_pit_d50 = "PIT GE (det = 0.50)", GE_pit_d25 = "PIT GE (det = 0.25)"))
+
+xr   <- range(ge_lines$week_start[!is.na(ge_lines$GE)])
+bars <- dart |> mutate(week_start = wk_date(Week)) |>
+  filter(week_start >= xr[1], week_start <= xr[2])
+
+pal <- c("Current (NOAA) GE" = "black", "McCann et al. (2023) logit" = "#1a9641",
+         "PIT GE (det = 0.50)" = "#2166ac", "PIT GE (det = 0.25)" = "#d01c8b")
+
+ggplot() +
+  geom_col(data = bars, aes(week_start, spill_per/100), fill = "steelblue",
+           alpha = 0.18, width = 5) +
+  geom_line(data = ge_lines, aes(week_start, GE, color = method), linewidth = 0.9, na.rm = TRUE) +
+  geom_point(data = ge_lines, aes(week_start, GE, color = method), size = 1.8, na.rm = TRUE) +
+  scale_color_manual(values = pal) +
+  scale_y_continuous("Guidance efficiency", labels = percent_format(accuracy = 1),
+                     limits = c(0, 1),
+                     sec.axis = sec_axis(~ ., name = "Spill proportion",
+                                         labels = percent_format(accuracy = 1))) +
+  coord_cartesian(xlim = xr) +
+  labs(x = NULL, color = NULL,
+       title = "Weekly guidance efficiency — MY2025 wild steelhead",
+       subtitle = "Current NOAA GE vs spill-based alternatives; bars show weekly mean spill") +
+  theme_bw(base_size = 12) + theme(legend.position = "bottom")
+```
+
+In pre-spill weeks the methods agree (~40–60%). Once high spill begins the NOAA
+GE stabilizes near 13% while the spill-based lines fall to single digits (McCann
+collapses to ≤0.5%; the PIT brackets to 2–10%). The point is simply that the
+current ~13% looks too high under post-ROD spill. The model below estimates GE
+directly from the PIT detections rather than assuming the GRS detection
+probability.
+
+---
+
+## Direct PIT GE and the GRS detection problem
+
+If the GRS detection probability $\psi_d$ (the chance a spillway fish is detected
+at the monitored bay-1 antenna on day $d$) were known, GE would follow from the
+daily GRJ/GRS counts:
+
+$$\widehat{GE}_d = \frac{n_{\text{GRJ},d}}{n_{\text{GRJ},d} + n_{\text{GRS},d}/\psi_d}$$
+
+But GRS monitors only 1 of 8 spillbays, so its effective detection probability is
+
+$$\psi_d = \psi^* \cdot q_d$$
+
+— intrinsic antenna efficiency $\psi^*$ times the fraction of spillway fish using
+bay 1, $q_d$ (the bay-1 weir is more attractive to surface-oriented fish, and that
+attraction varies with flow). Neither $\psi^*$ nor $q_d$ is known, so the PIT
+ratio above can only be bracketed. The multistate model **estimates** $\psi_d$ as
+a parameter, using downstream recoveries at Little Goose for identification.
+
+---
+
+## The multistate model
+
+The model is a stratum-level multistate mark–recapture model on the
+first-detection histories of PIT-tagged fish at three arrays: **GRJ** (LGR
+bypass), **GRS** (LGR spillbay 1), and **GOJ** (Little Goose bypass). Per stratum
+$s$ it estimates three probabilities, which in the JAGS code (below) are named:
+
+| Code | Quantity |
+|---|---|
+| `psi[s]`  | **GE** — P(fish takes the JBS / bypass route) |
+| `p[s]`    | **GRS detection** — P(spillway fish detected at bay 1) — the $\psi_d$ above |
+| `phi[s]`  | **GOJ detection** — P(fish detected downstream at Little Goose) |
+
+Each detected fish falls into one of five histories. Conditioned on being
+detected somewhere, the cell probabilities are
+
+$$
+\begin{aligned}
+(\text{GRJ, no GOJ}) &: \psi(1-\phi) & (\text{GRJ, GOJ}) &: \psi\phi\\
+(\text{GRS, no GOJ}) &: (1-\psi)\,p\,(1-\phi) & (\text{GRS, GOJ}) &: (1-\psi)\,p\,\phi\\
+(\text{no LGR, GOJ}) &: (1-\psi)(1-p)\phi
+\end{aligned}
+$$
+
+The fifth cell — missed at **both** LGR arrays but recovered at GOJ — is what
+identifies the GRS detection probability `p` (and therefore corrects GE for the
+spillway fish GRS never saw). Each parameter is a hierarchical logistic
+regression on spill (`psi`, `p` on LGR spill; `phi` on LGS spill), and weeks are
+**nested** in coarser collapse strata: each week's level shrinks toward a
+data-estimated stratum mean (`mu_strat`), which in turn shrinks toward a global
+mean. The pipeline is three calls in the `smoltEASE` package:
+
+```{r pipeline, echo=TRUE, eval=FALSE}
+sthd_weekly <- transform(sthd_strata, Collapse = Week)        # one stratum per week
+ge_data <- prep_ge_data(pit_raw, sthd_weekly, lgr_spill,      # GRJ/GRS/GOJ histories + spill
+                        lgs_spill_data = lgs_spill, species = "sthd",
+                        goj_site = "GOJ", parent_strata = sthd_strata)
+ge_fit  <- fit_ge_model(ge_data, max_n = 500, seed = 42)      # JAGS fit (below)
+ge_draws <- generate_ge_draws(ge_fit, sthd_weekly,           # stratum -> daily GE draws
+              pass_dates = passage_dates, B = 2000, daily_spill = lgr_spill)
+```
+
+### The JAGS model (complete)
+
+This is the exact model `fit_ge_model()` fits (the nested form; the single-level
+form drops `mu_strat`/`sigma_strat` and writes `logit_psi[s] ~ dnorm(alpha + beta
+* lgr_spill_std[s], tau_psi)`). Every line is annotated.
+
+```
+model {
+
+  eps       <- 1.0E-9                     # tiny floor so no cell prob is exactly 0
+  tau_psi   <- pow(sigma_psi,   -2)       # precisions = 1/sigma^2  (JAGS dnorm uses precision)
+  tau_strat <- pow(sigma_strat, -2)       #   sigma_psi   : week-to-week (within-stratum) SD of logit(GE)
+  tau_p     <- pow(sigma_p,     -2)       #   sigma_strat : stratum-to-stratum SD of the GE level
+  tau_phi   <- pow(sigma_phi,   -2)
+
+  for (s in 1:S) {                        # s = stratum (here, one per week)
+
+    # --- GE (psi): nested hierarchical logistic regression on LGR spill ---
+    #   each week's logit(GE) is centered on its PARENT collapse-stratum mean
+    #   (mu_strat) plus a spill slope; beta is the within-stratum spill effect.
+    logit_psi[s] ~ dnorm(mu_strat[parent[s]] + beta * lgr_spill_std[s], tau_psi)
+    psi[s] <- ilogit(logit_psi[s])        # psi[s] = GE for stratum s
+
+    # --- GRS bay-1 detection probability (p): logistic regression on LGR spill ---
+    logit_p[s] ~ dnorm(alpha_p + beta_p * lgr_spill_std[s], tau_p)
+    p[s] <- ilogit(logit_p[s])            # p[s] = P(spillway fish seen at GRS) = psi_d
+
+    # --- GOJ (Little Goose) detection probability (phi): on LGS spill ---
+    logit_phi[s] ~ dnorm(alpha_phi + beta_phi * lgs_spill_std[s], tau_phi)
+    phi[s] <- ilogit(logit_phi[s])        # phi[s] = P(detected downstream at GOJ)
+
+    # --- five detection-history cell probabilities (unnormalised) ---
+    pi_raw[s, 1] <- psi[s] * (1 - phi[s])               + eps   # GRJ, not GOJ  (bypass, missed downstream)
+    pi_raw[s, 2] <- psi[s] * phi[s]                     + eps   # GRJ and GOJ   (bypass, seen downstream)
+    pi_raw[s, 3] <- (1 - psi[s]) * p[s] * (1 - phi[s])  + eps   # GRS, not GOJ  (spillway, detected at bay 1)
+    pi_raw[s, 4] <- (1 - psi[s]) * p[s] * phi[s]        + eps   # GRS and GOJ
+    pi_raw[s, 5] <- (1 - psi[s]) * (1 - p[s]) * phi[s]  + eps   # no LGR, GOJ   (spillway, MISSED at bay 1,
+                                                               #                recovered downstream) -> identifies p
+
+    # --- condition on being detected somewhere (we only see fish that were seen) ---
+    p_seen[s] <- pi_raw[s,1] + pi_raw[s,2] + pi_raw[s,3] +
+                 pi_raw[s,4] + pi_raw[s,5]
+    for (k in 1:5) {
+      pi_obs[s, k] <- pi_raw[s, k] / p_seen[s]          # cell probs given detection
+    }
+  }
+
+  # --- multinomial likelihood, ONLY for strata that have detection-history data ---
+  #   lik_idx / S_lik index the strata with N_seen > 0; data-empty weeks contribute
+  #   no likelihood term but still get a hierarchical psi (so they stay estimable).
+  for (j in 1:S_lik) {
+    n[lik_idx[j], 1:5] ~ dmulti(pi_obs[lik_idx[j], 1:5], N_seen[lik_idx[j]])
+  }
+
+  # --- nesting: collapse-stratum means shrink to a global mean (partial pooling) ---
+  for (g in 1:n_strat) {
+    mu_strat[g] ~ dnorm(alpha, tau_strat)
+  }
+
+  # --- priors: GE regression (alpha = global mean; beta = spill slope) ---
+  alpha       ~ dt(0, pow(2, -2), 7)      # Student-t(scale 2, df 7): weakly informative
+  beta        ~ dt(0, pow(1, -2), 7) T(, 0)  # T(,0): spill can only LOWER GE, never raise it
+  sigma_psi   ~ dunif(0.05, 3)
+  sigma_strat ~ dunif(0.05, 3)
+
+  # --- priors: GRS detection regression ---
+  alpha_p  ~ dt(0, pow(2, -2), 7)
+  beta_p   ~ dt(0, pow(1, -2), 7)
+  sigma_p  ~ dunif(0.05, 3)
+
+  # --- priors: GOJ detection regression -- INFORMATIVE, from McCann et al. (2023)
+  #     Table 8.3 (LGS steelhead bypass-passage logit coefficients). phi is the
+  #     least identifiable piece, so it is anchored by these external estimates.
+  alpha_phi ~ dnorm(-2.60, pow(0.30, -2))      # intercept ~ N(-2.60, sd 0.30)
+  beta_phi  ~ dnorm(-1.78, pow(0.25, -2)) T(, 0)  # spill slope ~ N(-1.78, sd 0.25), <= 0
+  sigma_phi ~ dunif(0.05, 1)
+}
+```
+
+Two data-preparation choices worth flagging:
+
+- **Multinomial thinning (`max_n = 500`).** Before fitting, each stratum's five
+  history counts are scaled down so the effective multinomial size `N_seen` is at
+  most `max_n`. The multinomial treats each detection as an independent replicate;
+  with tens of thousands of detections it would otherwise drive the GE posterior
+  to an implausibly tight point. This caps the per-stratum information (a
+  data-thinning device used by McCann et al. 2023). It is a candidate for
+  replacement by an explicit overdispersion model.
+- **Empty strata.** A week with no detection-history fish contributes no
+  likelihood term (`lik_idx` excludes it) but still receives a regression-based
+  GE, so sparse weeks remain estimable by partial pooling rather than breaking.
+
+---
+
+## From weekly estimates to daily GE
+
+`fit_ge_model()` estimates GE at the stratum (week) level. SCRAPI expands trap
+counts **daily**, and GE moves with daily spill, so the weekly posterior is
+resolved to a daily value using the same fitted spill regression. Spill is
+standardised with the mean $\bar s$ and SD $s_{sd}$ used in the fit. For a draw of
+stratum $s$ with GE $\psi_s$, the realised process deviation on the logit scale is
+recovered, then the day's spill is substituted:
+
+$$\text{std}_d = \frac{\text{spill}_d - \bar s}{s_{sd}}, \qquad
+  \varepsilon_s = \operatorname{logit}(\psi_s) - \big(\alpha + \beta\,\text{std}_s\big),$$
+
+$$\boxed{\;\widehat{GE}_d
+   = \operatorname{logit}^{-1}\!\big(\alpha + \beta\,\text{std}_d + \varepsilon_s\big)
+   = \operatorname{logit}^{-1}\!\big(\operatorname{logit}(\psi_s) + \beta\,(\text{std}_d - \text{std}_s)\big)\;}$$
+
+So the stratum's fitted GE level $\psi_s$ is held fixed (through $\varepsilon_s$)
+while the day's spill deviation from the stratum mean, scaled by the spill slope
+$\beta$, moves GE up or down. At a day whose spill equals the stratum mean,
+$\widehat{GE}_d = \psi_s$. This is applied **per posterior draw**, producing a
+daily GE draw matrix (days × draws); all days in a draw share the same
+$(\alpha, \beta, \varepsilon_s)$, so daily GE values are correlated through the
+coefficients rather than carrying independent daily noise.
+
+---
+
+## Into SCRAPI
+
+Each column of the daily GE draw matrix is one posterior draw. SCRAPI consumes
+one column per bootstrap iteration, so GE uncertainty — wider where the PIT data
+are thin — propagates into the abundance confidence intervals. (No abundance
+numbers are shown here.)
+
+---
+
+## Modeling choices for discussion
+
+1. **Identifiability of the GRS detection probability `p`.** It is identified
+   only by the fifth cell (missed at both LGR arrays, recovered at GOJ). Under
+   80–85% spill, a fish missed by GRS likely re-spills at Little Goose and is
+   never seen at GOJ, shrinking that cell toward zero. Is GOJ recovery alone
+   enough, or should LMJ/MCJ/IHR recoveries be added? Does the informative McCann
+   prior on `phi` stabilise this, or mask weak identification?
+2. **Bay-1 attraction `q_d`.** `p` currently absorbs $\psi^* \cdot q_d$ into one
+   spill-dependent probability. DART's `percent_spill_spillbay1` is a candidate
+   covariate for $q_d$ — worth adding?
+3. **Overdispersion.** The `max_n = 500` multinomial thinning vs an explicit
+   Dirichlet-multinomial / per-observation random effect that lets the data set
+   its own effective sample size.
+4. **Separate vs joint estimation.** GE is fit in this standalone model and the
+   posterior draws are plugged into SCRAPI's $1/GE$ expansion, rather than
+   estimating GE and abundance jointly (as in a full time-stratified CJS
+   abundance model). Is the two-step decoupling losing coherence / understating
+   uncertainty?
+5. **Resolution and pooling.** Weekly strata nested in collapse strata, then
+   resolved to daily via the spill regression. Is weekly-nested the right
+   granularity?
+
+---
+
+*Analysis in R using PTAGIS interrogation data, DART daily operations records,
+the `smoltEASE` package, and McCann et al. (2023) Table 8.3 coefficients. GE
+model: `smoltEASE::fit_ge_model` (multistate, hierarchical, JAGS).*
