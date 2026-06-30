@@ -3,9 +3,10 @@
 #' @description Wrangle raw PIT tag detection data into stratum-level summaries
 #'   for the JAGS guidance efficiency model. Two distinct fish pools are created:
 #'   (1) a psi estimation pool of upstream-tagged fish classified by their first
-#'   route through LGR (GRS vs. UND), and (2) direct LGR counts of all fish
-#'   detected at GRJ or GRS during each stratum period. A spill covariate is
-#'   attached by joining \code{spill_weekly} to strata by overlapping date ranges.
+#'   route through LGR (GRS vs. UND), and (2) direct counts of all fish
+#'   detected at GRJ, GRS, or GOJ during each stratum period. A spill covariate
+#'   is attached by joining \code{spill_weekly} to strata by overlapping date
+#'   ranges.
 #'
 #'   Five detection history counts are also computed for the multistate likelihood
 #'   in \code{\link{fit_ge_model}}:
@@ -54,9 +55,9 @@
 #'
 #' @return A data frame with one row per stratum and columns:
 #'   \code{stratum}, \code{stratum_idx}, \code{n_GRS_pool}, \code{n_UND},
-#'   \code{n_pool}, \code{n_GRJ_obs}, \code{n_GRS_obs}, \code{spill_val},
-#'   \code{lgs_spill_val}, \code{n_h1}, \code{n_h2}, \code{n_h3},
-#'   \code{n_h4}, \code{n_h5}.
+#'   \code{n_pool}, \code{n_GRJ_obs}, \code{n_GRS_obs}, \code{n_GOJ_obs},
+#'   \code{spill_val}, \code{lgs_spill_val}, \code{n_h1}, \code{n_h2},
+#'   \code{n_h3}, \code{n_h4}, \code{n_h5}.
 #'
 #' @importFrom dplyr filter arrange group_by slice ungroup transmute left_join
 #'   mutate case_when full_join summarise distinct count rename across
@@ -142,9 +143,13 @@ prep_ge_data <- function(dat_up,
               n_pool     = n_GRS_pool + n_UND,
               .groups    = "drop")
 
-  # Pool B: direct LGR counts
+  # Pool B: direct LGR and GOJ counts
+  # n_GOJ_obs is a raw diagnostic count of GOJ detections per stratum. It is
+  # not used inside the JAGS likelihood (which runs on n_h1-n_h5), but lets
+  # you quickly check GOJ detection volume per stratum, useful for the
+  # identifiability discussion around p and phi at high spill.
   lgr_counts <- dat_up %>%
-    filter(site %in% c("GRJ", "GRS")) %>%
+    filter(site %in% c("GRJ", "GRS", goj_site)) %>%
     distinct(tag, site, det_date) %>%
     left_join(strat_assign, by = c("det_date" = "date")) %>%
     filter(!is.na(stratum)) %>%
@@ -153,7 +158,9 @@ prep_ge_data <- function(dat_up,
     pivot_wider(names_from = site, values_from = n, values_fill = 0)
   if (!"GRJ" %in% names(lgr_counts)) lgr_counts$GRJ <- 0L
   if (!"GRS" %in% names(lgr_counts)) lgr_counts$GRS <- 0L
-  lgr_counts <- rename(lgr_counts, n_GRJ_obs = GRJ, n_GRS_obs = GRS)
+  if (!goj_site %in% names(lgr_counts)) lgr_counts[[goj_site]] <- 0L
+  lgr_counts <- rename(lgr_counts, n_GRJ_obs = GRJ, n_GRS_obs = GRS,
+                       n_GOJ_obs = !!goj_site)
 
   # Five detection history counts for multistate likelihood
   # First detection per tag per site (GRJ, GRS, GOJ)
