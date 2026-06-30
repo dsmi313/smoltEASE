@@ -49,7 +49,15 @@
 #'   nested model.
 #' @param max_n integer. Maximum effective sample size per stratum for the
 #'   multinomial likelihood. Counts are scaled proportionally if N_seen > max_n.
-#'   Default 300.
+#'   Default 1000. Sensitivity testing across max_n = 200, 500, 1000, and 2000
+#'   on MY2025 steelhead showed psi/p/phi point estimates stable to within
+#'   typical posterior uncertainty across that range, with CI width decreasing
+#'   smoothly (no plateau or instability) as max_n increased; 1000 was chosen
+#'   as a value that retains meaningful CI precision without showing signs of
+#'   overconfidence. Strata with very low raw detection counts (in particular,
+#'   few fish in the n_h5 history) remain unstable across MCMC runs regardless
+#'   of max_n, since their raw N_seen is already below the cap; this is a data
+#'   sparsity issue, not a max_n artifact, and is not resolved by this default.
 #' @param n_iter number of MCMC iterations after burn-in per chain. Default 10000.
 #' @param n_burnin number of adaptation/burn-in iterations. Default 5000.
 #' @param n_chains number of MCMC chains. Default 3.
@@ -111,7 +119,7 @@
 #'
 #' @export
 fit_ge_model <- function(ge_data,
-                         max_n    = 300,
+                         max_n    = 1000,
                          n_iter   = 10000,
                          n_burnin = 5000,
                          n_chains = 3,
