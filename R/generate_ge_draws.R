@@ -35,8 +35,11 @@
 #'   \code{stratum_idx} format. To estimate GE \strong{weekly}, pass a mapping in
 #'   which \code{Collapse} equals \code{Week} (one stratum per week) -- the same
 #'   mapping must be passed to \code{\link{prep_ge_data}}.
-#' @param pass_dates vector of dates (character or Date) corresponding to rows of
-#'   \code{passageData} (i.e. \code{passageData$SampleEndDate}).
+#' @param pass_dates vector of dates corresponding to rows of \code{passageData}
+#'   (i.e. \code{passageData$SampleEndDate}). Accepts \code{Date} objects or
+#'   character strings in any of the formats \code{"\%m/\%d/\%Y"},
+#'   \code{"\%Y-\%m-\%d"}, or \code{"\%d/\%m/\%Y"}. No \code{as.Date()} call
+#'   is needed by the caller.
 #' @param B number of GE draws to return. Default 2000.
 #' @param daily_spill optional data frame of daily LGR spill with columns
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric percentage) --
@@ -58,6 +61,14 @@ generate_ge_draws <- function(ge_fit,
                               B           = 2000,
                               daily_spill = NULL) {
 
+  # Internal date parser: handles Date objects and the three character formats
+  # that appear in SCRAPI/smoltEASE pipelines without requiring the caller to
+  # run as.Date() themselves.
+  parse_dates <- function(x) {
+    if (inherits(x, "Date")) return(x)
+    as.Date(x, tryFormats = c("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"))
+  }
+
   ge_data    <- ge_fit$ge_data
   obs_strata <- ge_fit$obs_strata
   spill_mean <- ge_fit$spill_mean
@@ -67,10 +78,7 @@ generate_ge_draws <- function(ge_fit,
   if (all(c("Week", "Collapse") %in% names(strat_assign)) &&
       !("date" %in% names(strat_assign))) {
 
-    all_dates <- sort(unique(tryCatch(
-      as.Date(pass_dates),
-      error = function(e) as.Date(pass_dates, tryFormats = c("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"))
-    )))
+    all_dates <- sort(unique(parse_dates(pass_dates)))
     wk_num    <- as.integer(format(all_dates, "%V"))
 
     week_to_strat <- strat_assign
@@ -104,8 +112,7 @@ generate_ge_draws <- function(ge_fit,
   obs_idx  <- match(obs_strata$stratum_idx, ge_data$stratum_idx)
   zero_idx <- setdiff(seq_len(n_all), obs_idx)
 
-  # Standardise stratum spill exactly as fit_ge_model did, so alpha/beta apply
-  # on the correct scale (the old code used raw spill_val here -- a bug).
+  # Standardise stratum spill exactly as fit_ge_model did
   strat_spill_std <- (ge_data$spill_val - spill_mean) / spill_sd
 
   # --- Per-stratum process deviation (eps) on the logit-psi scale ---
@@ -114,10 +121,10 @@ generate_ge_draws <- function(ge_fit,
   for (s in seq_along(obs_idx))
     eps_full[, obs_idx[s]] <- qlogis(psi_clamped[, s]) -
       (alpha_v + beta_v * strat_spill_std[obs_idx[s]])
-  for (zi in zero_idx)                       # no PIT data: draw from N(0, sigma_psi)
+  for (zi in zero_idx)
     eps_full[, zi] <- rnorm(B, 0, sigma_v)
 
-  # --- Stratum-constant GE draws (psi) for fallback / non-daily mode ---
+  # --- Stratum-constant GE draws for fallback / non-daily mode ---
   ge_strat <- matrix(NA_real_, nrow = B, ncol = n_all)
   ge_strat[, obs_idx] <- psi_draws
   for (zi in zero_idx)
@@ -130,40 +137,34 @@ generate_ge_draws <- function(ge_fit,
   wt_rowsums <- rowSums(wt_mat)
   season_ge  <- ifelse(wt_rowsums > 0,
                        rowSums(ge_strat * wt_mat) / wt_rowsums,
-                       rowMeans(ge_strat))   # B-length vector
+                       rowMeans(ge_strat))
 
   # --- Map strata to daily passageData rows ---
-  pass_dates_d  <- tryCatch(
-    as.Date(pass_dates),
-    error = function(e) as.Date(pass_dates, tryFormats = c("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"))
-  )
+  pass_dates_d  <- parse_dates(pass_dates)
   strat_dates_d <- as.Date(strat_assign$date)
   day_match     <- match(pass_dates_d, strat_dates_d)
-  strat_idx_v   <- strat_assign$stratum_idx[day_match]   # NA = unmatched date
+  strat_idx_v   <- strat_assign$stratum_idx[day_match]
 
   valid   <- !is.na(strat_idx_v)
-  ge_days <- matrix(season_ge, nrow = B, ncol = length(pass_dates))  # fallback
+  ge_days <- matrix(season_ge, nrow = B, ncol = length(pass_dates))
 
   if (is.null(daily_spill)) {
-    # Stratum-constant GE (original behaviour)
     ge_days[, valid] <- ge_strat[, strat_idx_v[valid]]
   } else {
-    # Daily-spill downscale within each stratum: GE_d follows that day's spill
-    # via the fitted regression, anchored by the stratum's process deviation.
     ds        <- daily_spill
     ds$Date   <- as.Date(ds$Date)
     spill_day <- ds$spill.per[match(pass_dates_d, ds$Date)]
     for (d in which(valid)) {
       s_col <- strat_idx_v[d]
       x_d   <- spill_day[d]
-      if (is.na(x_d)) x_d <- ge_data$spill_val[s_col]   # fall back to stratum mean
+      if (is.na(x_d)) x_d <- ge_data$spill_val[s_col]
       std_d <- (x_d - spill_mean) / spill_sd
       ge_days[, d] <- plogis(alpha_v + beta_v * std_d + eps_full[, s_col])
     }
     ge_days <- pmin(pmax(ge_days, 0), 1)
   }
 
-  result   <- t(ge_days)   # n_days x B
+  result   <- t(ge_days)
   draws_df <- as.data.frame(result)
   colnames(draws_df) <- paste0("boot_", seq_len(B))
   cbind(data.frame(SampleEndDate = pass_dates), draws_df)
