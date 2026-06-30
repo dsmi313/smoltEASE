@@ -10,8 +10,9 @@
 #'
 #'   The logit of each parameter is modelled as a linear function of spill
 #'   (LGR spill for psi and p; LGS spill for phi) plus stratum-level process
-#'   error. Informative priors on phi are derived from McCann et al. (2023)
-#'   Table 8.3 LGS steelhead coefficients.
+#'   error. The phi prior is derived from McCann et al. (2023) Table 8.3 LGS
+#'   steelhead coefficients, reprojected onto the standardized LGS spill scale
+#'   computed from this run's data (see Details).
 #'
 #'   GE is estimated directly as psi. \code{\link{generate_ge_draws}} then
 #'   uses the psi posterior draws and raw GRJ/GRS counts to compute per-draw
@@ -19,7 +20,7 @@
 #'
 #'   Weekly counts are capped at \code{max_n} per stratum before fitting to
 #'   prevent the multinomial likelihood from collapsing the posterior in
-#'   data-rich strata (following data-thinning approach of McCann et al. 2023).
+#'   data-rich strata.
 #'
 #'   The model is hierarchical: every stratum's \code{logit(psi)} is drawn from
 #'   the shared spill regression plus process error, so strata may be defined as
@@ -67,6 +68,11 @@
 #'   \item{obs_strata}{subset of \code{ge_data} with \code{n_pool > 0}}
 #'   \item{spill_mean}{mean of \code{spill_val} used for standardisation}
 #'   \item{spill_sd}{SD of \code{spill_val} used for standardisation}
+#'   \item{lgs_spill_mean}{mean of \code{lgs_spill_val} used for standardisation}
+#'   \item{lgs_spill_sd}{SD of \code{lgs_spill_val} used for standardisation}
+#'   \item{phi_prior}{list with the McCann-derived \code{alpha_phi_mean} and
+#'     \code{beta_phi_mean} used as this run's phi prior means, plus the raw
+#'     (un-standardized) McCann coefficients they were derived from}
 #'
 #' @details The five detection history cell probabilities (conditioned on
 #'   being observed at least once) are:
@@ -77,6 +83,31 @@
 #'     \item (GRS, GOJ):    (1 - psi) * p * phi
 #'     \item (no LGR, GOJ): (1 - psi) * (1 - p) * phi
 #'   }
+#'
+#'   \strong{phi prior derivation.} McCann et al. (2023) Table 8.3 (LGS,
+#'   steelhead) gives a fixed-intercept regression on the raw (0-100 percent)
+#'   PropSpill scale: \code{logit(p) = logit(FGE) + beta_stFlow*stFlow +
+#'   beta_PropSpill*PropSpill + beta_Weir*Weir}, with FGE = 0.81,
+#'   beta_PropSpill = -0.07718, beta_Weir = -0.42932 for LGS steelhead. The
+#'   PropSpill percent scale (not proportion) is confirmed by the report's own
+#'   worked example in Table 8.2 (Chinook, LGS): \code{logit(p) = logit(0.78) +
+#'   0.01066*(80-24) - 0.08227*30 - 0.34165}, where 30 denotes 30 percent
+#'   spill. This function drops the stFlow term (held at its reference value)
+#'   since the JAGS phi model is spill-only, and fixes Weir = 1 (surface
+#'   spillway weir in operation), consistent with the rest of this pipeline.
+#'   This yields a raw-scale intercept and slope:
+#'   \code{alpha_raw = logit(FGE) + beta_Weir}, \code{beta_raw = beta_PropSpill}.
+#'   Because the JAGS model uses standardized LGS spill
+#'   (\code{lgs_spill_std = (lgs_spill_val - mean)/sd}), these raw coefficients
+#'   are reprojected onto the standardized scale using this run's own
+#'   \code{lgs_spill_val} mean and SD:
+#'   \code{alpha_phi_mean = alpha_raw + beta_raw * mean(lgs_spill_val)},
+#'   \code{beta_phi_mean = beta_raw * sd(lgs_spill_val)}. This reprojection is
+#'   necessary every time the model is fit on a new migration year, since the
+#'   mean and SD of LGS spill shift year to year even though McCann's raw
+#'   coefficients do not. The prior SDs (0.30 for alpha_phi, 0.25 for
+#'   beta_phi) reflect McCann's own coefficient uncertainty and are held fixed
+#'   across years; only the prior means are reprojected.
 #'
 #' @export
 fit_ge_model <- function(ge_data,
@@ -111,9 +142,59 @@ fit_ge_model <- function(ge_data,
   if (!is.finite(spill_sd) || spill_sd == 0)
     stop("spill_val has zero or undefined SD among observed strata.")
 
-  lgr_spill_std <- (obs_strata$spill_val     - spill_mean) / spill_sd
-  lgs_spill_std <- (obs_strata$lgs_spill_val - mean(obs_strata$lgs_spill_val, na.rm = TRUE)) /
-                    sd(obs_strata$lgs_spill_val, na.rm = TRUE)
+  lgr_spill_std  <- (obs_strata$spill_val - spill_mean) / spill_sd
+  lgs_spill_mean <- mean(obs_strata$lgs_spill_val, na.rm = TRUE)
+  lgs_spill_sd   <- sd(obs_strata$lgs_spill_val,   na.rm = TRUE)
+  if (!is.finite(lgs_spill_sd) || lgs_spill_sd == 0)
+    stop("lgs_spill_val has zero or undefined SD among observed strata.")
+  lgs_spill_std <- (obs_strata$lgs_spill_val - lgs_spill_mean) / lgs_spill_sd
+
+  # --- McCann et al. (2023) Table 8.3 LGS steelhead phi prior, reprojected ---
+  # Table 8.3 (LGS, steelhead): Intercept (logit FGE) = 0.81, stFlow = 0.00998,
+  # PropSpill = -0.07718, Weir = -0.42932. PropSpill is on a 0-100 (percent)
+  # scale, confirmed by the report's own worked example (Table 8.2, LGS Chinook:
+  # logit(p) = logit(0.78) + 0.01066*(80-24) - 0.08227*30 - 0.34165, where 30 is
+  # 30% spill, not 0.30). stFlow is dropped here (held at its reference value,
+  # i.e. minimum flow) since the JAGS phi model is spill-only. Weir is fixed at
+  # 1 (surface spillway weir in operation), matching the rest of this pipeline.
+  #
+  # The raw-scale McCann model is: logit(phi) = alpha_raw + beta_raw * PropSpill
+  # where PropSpill is lgs_spill_val on its natural 0-100 scale. Because the
+  # JAGS model uses standardized spill (lgs_spill_std = (lgs_spill_val - mean)/sd),
+  # the raw-scale coefficients must be reprojected onto that scale each time the
+  # model is fit, since mean/sd of lgs_spill_val change by migration year:
+  #   alpha_std = alpha_raw + beta_raw * mean(lgs_spill_val)
+  #   beta_std  = beta_raw * sd(lgs_spill_val)
+  # The prior SDs (0.30, 0.25) reflect McCann's own coefficient uncertainty and
+  # are not rescaled; only the means shift with each year's spill distribution.
+  mccann_FGE_LGS_sthd       <- 0.81
+  mccann_weir_LGS_sthd      <- -0.42932
+  mccann_propspill_LGS_sthd <- -0.07718
+  mccann_weir_on            <- 1
+
+  alpha_phi_raw <- qlogis(mccann_FGE_LGS_sthd) + mccann_weir_LGS_sthd * mccann_weir_on
+  beta_phi_raw  <- mccann_propspill_LGS_sthd
+
+  alpha_phi_prior_mean <- alpha_phi_raw + beta_phi_raw * lgs_spill_mean
+  beta_phi_prior_mean  <- beta_phi_raw  * lgs_spill_sd
+
+  phi_prior <- list(
+    alpha_phi_mean = alpha_phi_prior_mean,
+    beta_phi_mean  = beta_phi_prior_mean,
+    alpha_phi_sd   = 0.30,
+    beta_phi_sd    = 0.25,
+    alpha_raw      = alpha_phi_raw,
+    beta_raw       = beta_phi_raw,
+    mccann_FGE     = mccann_FGE_LGS_sthd,
+    mccann_weir    = mccann_weir_LGS_sthd,
+    mccann_propspill = mccann_propspill_LGS_sthd,
+    weir_on        = mccann_weir_on
+  )
+
+  message(sprintf(
+    "phi prior (McCann 2023 Table 8.3, LGS steelhead, reprojected): alpha_phi ~ N(%.3f, %.2f), beta_phi ~ N(%.3f, %.2f)",
+    alpha_phi_prior_mean, phi_prior$alpha_phi_sd, beta_phi_prior_mean, phi_prior$beta_phi_sd
+  ))
 
   # Build history count matrix and cap N_seen
   n_mat <- as.matrix(obs_strata[, c("n_h1","n_h2","n_h3","n_h4","n_h5")])
@@ -151,7 +232,11 @@ fit_ge_model <- function(ge_data,
     n             = n_mat,
     N_seen        = N_seen,
     lgr_spill_std = as.numeric(lgr_spill_std),
-    lgs_spill_std = as.numeric(lgs_spill_std)
+    lgs_spill_std = as.numeric(lgs_spill_std),
+    alpha_phi_mean = alpha_phi_prior_mean,
+    alpha_phi_sd   = phi_prior$alpha_phi_sd,
+    beta_phi_mean  = beta_phi_prior_mean,
+    beta_phi_sd    = phi_prior$beta_phi_sd
   )
   if (nested) {
     jags_data$parent  <- as.array(parent_obs)
@@ -206,9 +291,14 @@ fit_ge_model <- function(ge_data,
     beta_p   ~ dt(0, pow(1, -2), 7)
     sigma_p  ~ dunif(0.05, 3)
 
-    # Informative priors from McCann et al. (2023) Table 8.3 LGS steelhead
-    alpha_phi ~ dnorm(-2.60, pow(0.30, -2))
-    beta_phi  ~ dnorm(-1.78, pow(0.25, -2)) T(, 0)
+    # phi prior: McCann et al. (2023) Table 8.3 LGS steelhead coefficients,
+    # reprojected onto this run's standardized LGS spill scale (see Details
+    # in the function documentation). Means are passed in as data
+    # (alpha_phi_mean, beta_phi_mean) so they are recomputed fresh every time
+    # fit_ge_model() runs, since they depend on this migration year's spill
+    # distribution, not just on the fixed McCann coefficients.
+    alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
+    beta_phi  ~ dnorm(beta_phi_mean,  pow(beta_phi_sd,  -2)) T(, 0)
     sigma_phi ~ dunif(0.05, 1)
   }"
 
@@ -268,9 +358,14 @@ fit_ge_model <- function(ge_data,
     beta_p   ~ dt(0, pow(1, -2), 7)
     sigma_p  ~ dunif(0.05, 3)
 
-    # Informative priors from McCann et al. (2023) Table 8.3 LGS steelhead
-    alpha_phi ~ dnorm(-2.60, pow(0.30, -2))
-    beta_phi  ~ dnorm(-1.78, pow(0.25, -2)) T(, 0)
+    # phi prior: McCann et al. (2023) Table 8.3 LGS steelhead coefficients,
+    # reprojected onto this run's standardized LGS spill scale (see Details
+    # in the function documentation). Means are passed in as data
+    # (alpha_phi_mean, beta_phi_mean) so they are recomputed fresh every time
+    # fit_ge_model() runs, since they depend on this migration year's spill
+    # distribution, not just on the fixed McCann coefficients.
+    alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
+    beta_phi  ~ dnorm(beta_phi_mean,  pow(beta_phi_sd,  -2)) T(, 0)
     sigma_phi ~ dunif(0.05, 1)
   }"
 
@@ -299,10 +394,13 @@ fit_ge_model <- function(ge_data,
   )
 
   list(
-    samples    = samples,
-    ge_data    = ge_data,
-    obs_strata = obs_strata,
-    spill_mean = spill_mean,
-    spill_sd   = spill_sd
+    samples        = samples,
+    ge_data        = ge_data,
+    obs_strata     = obs_strata,
+    spill_mean     = spill_mean,
+    spill_sd       = spill_sd,
+    lgs_spill_mean = lgs_spill_mean,
+    lgs_spill_sd   = lgs_spill_sd,
+    phi_prior      = phi_prior
   )
 }
