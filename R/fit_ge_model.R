@@ -4,29 +4,28 @@
 #'   multistate mark-recapture model. Detection histories from GRJ (bypass),
 #'   GRS (spillway bay 1), and GOJ (Little Goose bypass) are used to jointly
 #'   estimate psi (GE), p (GRS detection probability), and phi (GOJ survival
-#'   and bypass probability). 
+#'   and bypass probability).
 #'
-#'   The logit of psi is modelled as a spill regression plus a random walk
-#'   deviation delta that absorbs week-to-week autocorrelation in GE beyond
-#'   what spill explains:
+#'   The logit of each parameter is modelled as a linear function of spill
+#'   (LGR spill for psi and p; LGS spill for phi) plus stratum-level i.i.d.
+#'   process error. A random walk extension on logit(psi) was evaluated but
+#'   found to be non-identifiable given the nested hierarchical structure: the
+#'   global intercept alpha and the walk's initial level delta[1] are collinear
+#'   and both float freely in the posterior. The i.i.d. process error model
+#'   with nested shrinkage (mu_strat) was retained.
 #'
-#'   logit(psi_s) = mu_strat[g(s)] + beta * spill_s + delta_s
-#'   delta_s ~ N(delta_{s-1}, sigma_psi^2)
-#'   delta_1 ~ N(pre_trap_logit_ge, 5^2)
-#'
-#'   The prior mean for delta[1] is a logit-scale GE estimate computed in
-#'   \code{\link{prep_ge_data}} from PIT detections in the week prior to trap
-#'   operation, providing a data-informed but weakly constrained starting point
-#'   for the random walk.
+#'   The phi prior is derived from McCann et al. (2023) Table 8.3 LGS steelhead
+#'   coefficients, reprojected onto the standardized LGS spill scale computed
+#'   from this run's data (see Details). McCann et al. (2023) report only point
+#'   estimates (medians across 1,000 resampling iterations) with no standard
+#'   errors; prior SDs of 0.50 for both alpha_phi and beta_phi were chosen to
+#'   allow meaningful departure from the McCann estimates while still anchoring
+#'   phi in data-sparse strata.
 #'
 #'   When \code{ge_data} contains a \code{bay1_spill_val} column (added by
 #'   \code{\link{prep_ge_data}} when \code{spill_data} carries \code{bay1.per}),
 #'   p is modelled as a function of both total LGR spill and bay-1 spill percent,
 #'   following Hance et al. (2024). When absent, only total LGR spill is used.
-#'
-#'   The phi prior is derived from McCann et al. (2023) Table 8.3 LGS steelhead
-#'   coefficients, reprojected onto the standardized LGS spill scale computed
-#'   from this run's data (see Details).
 #'
 #'   \strong{Nested (two-level) shrinkage.} When \code{ge_data} carries a
 #'   \code{parent} column (added by \code{\link{prep_ge_data}} via its
@@ -36,9 +35,7 @@
 #'
 #' @param ge_data data frame returned by \code{\link{prep_ge_data}}. Must
 #'   contain columns \code{stratum_idx}, \code{n_GRJ_obs}, \code{n_GRS_obs},
-#'   \code{n_pool}, \code{spill_val}, and \code{lgs_spill_val}. Attribute
-#'   \code{pre_trap_logit_ge} (set by \code{\link{prep_ge_data}}) is used to
-#'   initialize the random walk prior on \code{delta[1]}. Optional
+#'   \code{n_pool}, \code{spill_val}, and \code{lgs_spill_val}. Optional
 #'   \code{bay1_spill_val} column triggers the two-covariate p regression.
 #'   Optional \code{parent} column triggers the nested model.
 #' @param max_n integer. Maximum effective sample size per stratum for the
@@ -52,8 +49,7 @@
 #' @param seed random seed. Default 42.
 #'
 #' @return A list with elements:
-#'   \item{samples}{an \code{mcmc.list} of posterior draws including
-#'     \code{delta[1..S]} (random walk deviations)}
+#'   \item{samples}{an \code{mcmc.list} of posterior draws}
 #'   \item{ge_data}{the input \code{ge_data} (passed through)}
 #'   \item{obs_strata}{subset of \code{ge_data} with \code{n_pool > 0}}
 #'   \item{spill_mean}{mean of \code{spill_val} used for standardisation}
@@ -80,6 +76,8 @@
 #'   Reprojected onto standardized LGS spill each run:
 #'   alpha_phi_mean = alpha_raw + beta_raw * mean(lgs_spill_val),
 #'   beta_phi_mean  = beta_raw * sd(lgs_spill_val).
+#'   Prior SDs of 0.50 for both alpha_phi and beta_phi reflect that McCann
+#'   et al. (2023) report only point estimates with no standard errors.
 #'
 #' @export
 fit_ge_model <- function(ge_data,
@@ -106,14 +104,6 @@ fit_ge_model <- function(ge_data,
   if (has_bay1) {
     message("bay1_spill_val found: using two-covariate p regression ",
             "(total LGR spill + bay-1 spill percent), following Hance et al. (2024).")
-  }
-
-  pre_trap_logit_ge <- attr(ge_data, "pre_trap_logit_ge")
-  if (is.null(pre_trap_logit_ge)) {
-    message("pre_trap_logit_ge attribute not found on ge_data; ",
-            "initialising delta[1] prior mean at 0 (logit(0.5)). ",
-            "Re-run prep_ge_data() to compute from pre-trap PIT detections.")
-    pre_trap_logit_ge <- 0
   }
 
   obs_strata <- ge_data[ge_data$n_pool > 0, ]
@@ -145,7 +135,9 @@ fit_ge_model <- function(ge_data,
     bay1_spill_std <- (obs_strata$bay1_spill_val - bay1_spill_mean) / bay1_spill_sd
   }
 
-  # McCann et al. (2023) Table 8.3 LGS steelhead phi prior, reprojected
+  # McCann et al. (2023) Table 8.3 LGS steelhead phi prior, reprojected.
+  # Table 8.3 reports medians only (no SEs); prior SDs of 0.50 chosen to allow
+  # meaningful departure from the McCann point estimates while anchoring phi.
   #   alpha_raw = logit(0.81) + (-0.42932)*1 = 1.0207
   #   beta_raw  = -0.07718  (per % spill)
   #   alpha_phi_mean = alpha_raw + beta_raw * mean(lgs_spill_val)
@@ -199,18 +191,17 @@ fit_ge_model <- function(ge_data,
   }
 
   jags_data <- list(
-    S                 = S,
-    S_lik             = S_lik,
-    lik_idx           = as.array(lik_idx),
-    n                 = n_mat,
-    N_seen            = N_seen,
-    lgr_spill_std     = as.numeric(lgr_spill_std),
-    lgs_spill_std     = as.numeric(lgs_spill_std),
-    alpha_phi_mean    = alpha_phi_prior_mean,
-    alpha_phi_sd      = phi_prior$alpha_phi_sd,
-    beta_phi_mean     = beta_phi_prior_mean,
-    beta_phi_sd       = phi_prior$beta_phi_sd,
-    pre_trap_logit_ge = pre_trap_logit_ge
+    S             = S,
+    S_lik         = S_lik,
+    lik_idx       = as.array(lik_idx),
+    n             = n_mat,
+    N_seen        = N_seen,
+    lgr_spill_std = as.numeric(lgr_spill_std),
+    lgs_spill_std = as.numeric(lgs_spill_std),
+    alpha_phi_mean = alpha_phi_prior_mean,
+    alpha_phi_sd   = phi_prior$alpha_phi_sd,
+    beta_phi_mean  = beta_phi_prior_mean,
+    beta_phi_sd    = phi_prior$beta_phi_sd
   )
   if (has_bay1)  jags_data$bay1_spill_std <- as.numeric(bay1_spill_std)
   if (nested)  { jags_data$parent  <- as.array(parent_obs)
@@ -224,17 +215,9 @@ fit_ge_model <- function(ge_data,
     tau_p     <- pow(sigma_p,   -2)
     tau_phi   <- pow(sigma_phi, -2)
 
-    # Random walk on logit-scale deviations from spill regression.
-    # delta[1] anchored by pre-trap PIT data (see prep_ge_data()); prior SD
-    # of 5 is nearly flat on the logit scale so week-13 likelihood dominates.
-    delta[1] ~ dnorm(pre_trap_logit_ge, pow(5, -2))
-    for (s in 2:S) {
-      delta[s] ~ dnorm(delta[s-1], tau_psi)
-    }
-
     for (s in 1:S) {
 
-      logit_psi[s] <- alpha + beta * lgr_spill_std[s] + delta[s]
+      logit_psi[s] ~ dnorm(alpha + beta * lgr_spill_std[s], tau_psi)
       psi[s] <- ilogit(logit_psi[s])
 
       logit_p[s] ~ dnorm(alpha_p + beta_p * lgr_spill_std[s], tau_p)
@@ -268,6 +251,13 @@ fit_ge_model <- function(ge_data,
     beta_p   ~ dt(0, pow(1, -2), 7)
     sigma_p  ~ dunif(0.05, 3)
 
+    # phi prior: McCann et al. (2023) Table 8.3 LGS steelhead, reprojected.
+    # Table 8.3 reports medians only; prior SDs of 0.50 allow meaningful
+    # departure from the McCann point estimates.
+    #   alpha_raw = logit(0.81) + (-0.42932)*1 = 1.0207
+    #   beta_raw  = -0.07718  (per % spill)
+    #   alpha_phi_mean = alpha_raw + beta_raw * mean(lgs_spill_val)
+    #   beta_phi_mean  = beta_raw  * sd(lgs_spill_val)
     alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
     beta_phi  ~ dnorm(beta_phi_mean,  pow(beta_phi_sd,  -2)) T(, 0)
     sigma_phi ~ dunif(0.05, 3)
@@ -281,14 +271,9 @@ fit_ge_model <- function(ge_data,
     tau_p     <- pow(sigma_p,   -2)
     tau_phi   <- pow(sigma_phi, -2)
 
-    delta[1] ~ dnorm(pre_trap_logit_ge, pow(5, -2))
-    for (s in 2:S) {
-      delta[s] ~ dnorm(delta[s-1], tau_psi)
-    }
-
     for (s in 1:S) {
 
-      logit_psi[s] <- alpha + beta * lgr_spill_std[s] + delta[s]
+      logit_psi[s] ~ dnorm(alpha + beta * lgr_spill_std[s], tau_psi)
       psi[s] <- ilogit(logit_psi[s])
 
       logit_p[s] ~ dnorm(alpha_p + beta_p * lgr_spill_std[s] + beta2_p * bay1_spill_std[s], tau_p)
@@ -337,14 +322,9 @@ fit_ge_model <- function(ge_data,
     tau_p     <- pow(sigma_p,     -2)
     tau_phi   <- pow(sigma_phi,   -2)
 
-    delta[1] ~ dnorm(pre_trap_logit_ge, pow(5, -2))
-    for (s in 2:S) {
-      delta[s] ~ dnorm(delta[s-1], tau_psi)
-    }
-
     for (s in 1:S) {
 
-      logit_psi[s] <- mu_strat[parent[s]] + beta * lgr_spill_std[s] + delta[s]
+      logit_psi[s] ~ dnorm(mu_strat[parent[s]] + beta * lgr_spill_std[s], tau_psi)
       psi[s] <- ilogit(logit_psi[s])
 
       logit_p[s] ~ dnorm(alpha_p + beta_p * lgr_spill_std[s], tau_p)
@@ -395,14 +375,9 @@ fit_ge_model <- function(ge_data,
     tau_p     <- pow(sigma_p,     -2)
     tau_phi   <- pow(sigma_phi,   -2)
 
-    delta[1] ~ dnorm(pre_trap_logit_ge, pow(5, -2))
-    for (s in 2:S) {
-      delta[s] ~ dnorm(delta[s-1], tau_psi)
-    }
-
     for (s in 1:S) {
 
-      logit_psi[s] <- mu_strat[parent[s]] + beta * lgr_spill_std[s] + delta[s]
+      logit_psi[s] ~ dnorm(mu_strat[parent[s]] + beta * lgr_spill_std[s], tau_psi)
       psi[s] <- ilogit(logit_psi[s])
 
       logit_p[s] ~ dnorm(alpha_p + beta_p * lgr_spill_std[s] + beta2_p * bay1_spill_std[s], tau_p)
@@ -450,7 +425,7 @@ fit_ge_model <- function(ge_data,
                   if (has_bay1)            model_flat_bay1      else
                                            model_flat_single
 
-  monitor <- c("psi", "p", "phi", "delta",
+  monitor <- c("psi", "p", "phi",
                "alpha", "beta", "sigma_psi",
                "alpha_p", "beta_p", "sigma_p",
                "alpha_phi", "beta_phi", "sigma_phi")
