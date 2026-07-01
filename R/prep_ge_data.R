@@ -33,31 +33,25 @@
 #'       and \code{stratum_idx} (integer, 1-based, monotonically increasing).
 #'   }
 #' @param parent_strata optional two-column data frame giving a coarser parent
-#'   grouping for a nested (two-level) GE fit. The first column must match the
-#'   stratum ids produced here (i.e. the \code{Collapse}/stratum value used in
-#'   \code{strat_assign}; for a weekly run that is the week number), the second
-#'   column is the parent group id (e.g. the collapse-stratum). When supplied, a
-#'   \code{parent} column is added to the output and \code{\link{fit_ge_model}}
-#'   shrinks each stratum's psi toward its parent group's mean. Pass your
-#'   Week/Collapse table here when running weekly. Default \code{NULL}
-#'   (single-level fit).
+#'   grouping for a nested (two-level) GE fit. Default \code{NULL}.
 #' @param spill_data data frame of daily LGR spill values. Required columns:
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric, percentage).
+#'   An optional column \code{bay1.per} (numeric, percentage of total flow
+#'   passing through spillbay 1, i.e. \code{percent_spill_spillbay1} from DART)
+#'   is used as a second covariate in the GRS detection probability regression.
+#'   When present, \code{bay1_spill_val} is added to the output and
+#'   \code{\link{fit_ge_model}} includes it alongside total LGR spill for \code{p}.
+#'   If absent, only total LGR spill is used for \code{p}.
 #' @param lgs_spill_data data frame of daily LGS spill values. Required columns:
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric, percentage).
-#'   Used to fit the phi (GOJ detection) regression. If \code{NULL}, LGS spill
-#'   is assumed equal to LGR spill (not recommended under post-ROD operations).
+#'   If \code{NULL}, LGR spill is used for phi (not recommended).
 #' @param species one of \code{"chnk"} or \code{"sthd"}.
-#' @param goj_site character. Site code for the Little Goose bypass array used
-#'   to compute detection history counts. Default \code{"GOJ"}.
-#' @param downstream_sites character vector of site codes used to identify
-#'   fish that have passed through LGR for Pool A classification.
+#' @param goj_site character. Site code for the Little Goose bypass array. Default \code{"GOJ"}.
+#' @param downstream_sites character vector of downstream site codes for Pool A.
 #'
-#' @return A data frame with one row per stratum and columns:
-#'   \code{stratum}, \code{stratum_idx}, \code{n_GRS_pool}, \code{n_UND},
-#'   \code{n_pool}, \code{n_GRJ_obs}, \code{n_GRS_obs}, \code{n_GOJ_obs},
-#'   \code{spill_val}, \code{lgs_spill_val}, \code{n_h1}, \code{n_h2},
-#'   \code{n_h3}, \code{n_h4}, \code{n_h5}.
+#' @return A data frame with one row per stratum. When \code{spill_data}
+#'   contains \code{bay1.per}, \code{bay1_spill_val} is included and
+#'   \code{\link{fit_ge_model}} will automatically use a two-covariate p regression.
 #'
 #' @importFrom dplyr filter arrange group_by slice ungroup transmute left_join
 #'   mutate case_when full_join summarise distinct count rename across
@@ -80,7 +74,6 @@ prep_ge_data <- function(dat_up,
 
   species <- match.arg(species, c("chnk", "sthd"))
 
-  # Restrict to upstream-tagged fish
   if (!is.null(min_mark_rkm) && "mark_rkm" %in% names(dat_up)) {
     n_before <- length(unique(dat_up$tag))
     dat_up   <- dat_up[!is.na(dat_up$mark_rkm) & dat_up$mark_rkm > min_mark_rkm, ]
@@ -89,7 +82,6 @@ prep_ge_data <- function(dat_up,
             length(unique(dat_up$tag)), " retained.")
   }
 
-  # Normalise strat_assign to date/stratum/stratum_idx format
   if (all(c("Week", "Collapse") %in% names(strat_assign)) &&
       !("date" %in% names(strat_assign))) {
 
@@ -144,10 +136,6 @@ prep_ge_data <- function(dat_up,
               .groups    = "drop")
 
   # Pool B: direct LGR and GOJ counts
-  # n_GOJ_obs is a raw diagnostic count of GOJ detections per stratum. It is
-  # not used inside the JAGS likelihood (which runs on n_h1-n_h5), but lets
-  # you quickly check GOJ detection volume per stratum, useful for the
-  # identifiability discussion around p and phi at high spill.
   lgr_counts <- dat_up %>%
     filter(site %in% c("GRJ", "GRS", goj_site)) %>%
     distinct(tag, site, det_date) %>%
@@ -162,8 +150,7 @@ prep_ge_data <- function(dat_up,
   lgr_counts <- rename(lgr_counts, n_GRJ_obs = GRJ, n_GRS_obs = GRS,
                        n_GOJ_obs = !!goj_site)
 
-  # Five detection history counts for multistate likelihood
-  # First detection per tag per site (GRJ, GRS, GOJ)
+  # Five detection history counts
   lgr_sites <- c("GRJ", "GRS", goj_site)
 
   first_det <- dat_up %>%
@@ -176,7 +163,6 @@ prep_ge_data <- function(dat_up,
     pivot_wider(names_from = site, values_from = det_date,
                 values_fn  = min, values_fill = NA)
 
-  # Ensure all three columns exist
   for (col in c("GRJ", "GRS", goj_site)) {
     if (!col %in% names(tag_wide)) tag_wide[[col]] <- as.Date(NA)
   }
@@ -185,9 +171,9 @@ prep_ge_data <- function(dat_up,
   fish <- tag_wide %>%
     mutate(
       a = case_when(
-        !is.na(GRJ)              ~ 1L,
+        !is.na(GRJ)               ~ 1L,
         !is.na(GRS) & is.na(GRJ) ~ 2L,
-        TRUE                      ~ 0L
+        TRUE                       ~ 0L
       ),
       b        = if_else(!is.na(GOJ), 1L, 0L),
       lgr_date = case_when(
@@ -214,15 +200,37 @@ prep_ge_data <- function(dat_up,
     pivot_wider(names_from = h, values_from = n, values_fill = 0L,
                 names_prefix = "n_h")
 
-  # LGR spill covariate
-  spill_df       <- spill_data
-  spill_df$Date  <- as.Date(spill_df$Date)
+  # LGR total spill covariate
+  spill_df      <- spill_data
+  spill_df$Date <- as.Date(spill_df$Date)
 
   spill_strat <- strat_assign %>%
     left_join(spill_df[, c("Date", "spill.per")], by = c("date" = "Date")) %>%
     group_by(stratum) %>%
     summarise(spill_val = mean(spill.per, na.rm = TRUE), .groups = "drop") %>%
     mutate(spill_val = replace_na(spill_val, 0))
+
+  # Bay-1 spill covariate for the p (GRS detection) regression.
+  # GRS is the bay-1 antenna; the fraction of spillway flow through bay 1
+  # (q_d) drives how many spillway fish are attracted to that bay and therefore
+  # how likely GRS is to detect them. Following Hance et al. (2024), bay-1
+  # spill is included as a second covariate in the p regression alongside
+  # total LGR spill, separating the effect of overall spill magnitude from the
+  # bay-1 attraction rate. Sourced from DART's percent_spill_spillbay1;
+  # rename to bay1.per before passing in spill_data. When present,
+  # fit_ge_model() automatically switches to the two-covariate p regression.
+  has_bay1 <- "bay1.per" %in% names(spill_df)
+  if (has_bay1) {
+    bay1_strat <- strat_assign %>%
+      left_join(spill_df[, c("Date", "bay1.per")], by = c("date" = "Date")) %>%
+      group_by(stratum) %>%
+      summarise(bay1_spill_val = mean(bay1.per, na.rm = TRUE), .groups = "drop") %>%
+      mutate(bay1_spill_val = replace_na(bay1_spill_val, 0))
+  } else {
+    message("bay1.per not found in spill_data; bay-1 spill will not be used as a ",
+            "covariate for p. Rename percent_spill_spillbay1 to bay1.per in your ",
+            "DART spill data to enable the two-covariate p regression.")
+  }
 
   # LGS spill covariate for phi regression
   if (!is.null(lgs_spill_data)) {
@@ -241,7 +249,6 @@ prep_ge_data <- function(dat_up,
       select(stratum, lgs_spill_val)
   }
 
-  # Combine all stratum summaries
   ge_out <- full_join(psi_pool, lgr_counts, by = "stratum") %>%
     left_join(hist_counts,  by = "stratum") %>%
     left_join(spill_strat,  by = "stratum") %>%
@@ -249,10 +256,12 @@ prep_ge_data <- function(dat_up,
     mutate(across(where(is.numeric), ~replace_na(., 0))) %>%
     arrange(stratum_idx)
 
-  # Attach parent grouping for a nested fit. The parent table's first column
-  # matches the stratum id; the second is the parent group. Strata with no
-  # match are placed in their own singleton parent (so they are never pooled
-  # into an unrelated group).
+  if (has_bay1) {
+    ge_out <- ge_out %>%
+      left_join(bay1_strat, by = "stratum") %>%
+      mutate(bay1_spill_val = replace_na(bay1_spill_val, 0))
+  }
+
   if (!is.null(parent_strata)) {
     pmap   <- as.data.frame(parent_strata)
     praw   <- pmap[[2]][match(ge_out$stratum, pmap[[1]])]
