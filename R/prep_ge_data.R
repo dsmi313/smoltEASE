@@ -18,13 +18,15 @@
 #'     \item \code{n_h5}: not detected at LGR, detected at GOJ
 #'   }
 #'
-#' @param dat_up data frame of PIT tag detections as returned by
-#'   \code{\link{prep_pit_data}}. Required columns: \code{tag} (character),
-#'   \code{site} (character site code), \code{det_date} (Date). Optional column
-#'   \code{mark_rkm} (numeric) is used with \code{min_mark_rkm} to restrict
-#'   Pool A to upstream-tagged fish without affecting Pool B.
-#' @param min_mark_rkm numeric. Restrict both pools to fish tagged strictly
-#'   above this RKM (e.g. \code{695} for LGR). Default \code{695}.
+#'   A pre-trap GE estimate is computed from PIT detections in the week
+#'   immediately prior to trap operation and stored as an attribute on the
+#'   returned data frame. This is used to initialize the random walk prior on
+#'   \code{delta[1]} in \code{\link{fit_ge_model}}.
+#'
+#' @param dat_up data frame of PIT tag detections. Required columns: \code{tag}
+#'   (character), \code{site} (character site code), \code{det_date} (Date).
+#'   Optional column \code{mark_rkm} (numeric) is used with \code{min_mark_rkm}
+#'   to restrict Pool A to upstream-tagged fish.
 #' @param strat_assign data frame mapping weeks to strata. Accepts two formats:
 #'   \itemize{
 #'     \item \strong{Week/Collapse format} (preferred): columns \code{Week}
@@ -32,26 +34,38 @@
 #'     \item \strong{Date format}: columns \code{date} (Date), \code{stratum},
 #'       and \code{stratum_idx} (integer, 1-based, monotonically increasing).
 #'   }
-#' @param parent_strata optional two-column data frame giving a coarser parent
-#'   grouping for a nested (two-level) GE fit. Default \code{NULL}.
 #' @param spill_data data frame of daily LGR spill values. Required columns:
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric, percentage).
 #'   An optional column \code{bay1.per} (numeric, percentage of total flow
-#'   passing through spillbay 1, i.e. \code{percent_spill_spillbay1} from DART)
-#'   is used as a second covariate in the GRS detection probability regression.
-#'   When present, \code{bay1_spill_val} is added to the output and
-#'   \code{\link{fit_ge_model}} includes it alongside total LGR spill for \code{p}.
-#'   If absent, only total LGR spill is used for \code{p}.
+#'   passing through spillbay 1) triggers the two-covariate p regression in
+#'   \code{\link{fit_ge_model}}.
+#' @param species one of \code{"chnk"} or \code{"sthd"}.
 #' @param lgs_spill_data data frame of daily LGS spill values. Required columns:
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric, percentage).
 #'   If \code{NULL}, LGR spill is used for phi (not recommended).
-#' @param species one of \code{"chnk"} or \code{"sthd"}.
-#' @param goj_site character. Site code for the Little Goose bypass array. Default \code{"GOJ"}.
+#' @param goj_site character. Site code for the Little Goose bypass array.
+#'   Default \code{"GOJ"}.
+#' @param min_mark_rkm numeric. Restrict to fish tagged above this RKM.
+#'   Default \code{695}.
+#' @param parent_strata optional two-column data frame giving a coarser parent
+#'   grouping for a nested (two-level) GE fit. Default \code{NULL}.
+#' @param p_grs_prior numeric. Assumed GRS detection probability for computing
+#'   the pre-trap GE estimate from the week prior to trap operation. Used only
+#'   to initialize \code{delta[1]} in the random walk prior; does not enter the
+#'   JAGS likelihood. Default \code{0.5}.
 #' @param downstream_sites character vector of downstream site codes for Pool A.
 #'
-#' @return A data frame with one row per stratum. When \code{spill_data}
-#'   contains \code{bay1.per}, \code{bay1_spill_val} is included and
-#'   \code{\link{fit_ge_model}} will automatically use a two-covariate p regression.
+#' @return A data frame with one row per stratum. Two scalar attributes are
+#'   attached for use by \code{\link{fit_ge_model}}:
+#'   \itemize{
+#'     \item \code{pre_trap_logit_ge}: logit-scale GE estimate from the week
+#'       prior to trap operation, computed as
+#'       \code{qlogis(n_GRJ / (n_GRJ + n_GRS / p_grs_prior))}. Used as the
+#'       prior mean for \code{delta[1]} in the random walk.
+#'     \item \code{has_bay1}: logical, whether \code{bay1_spill_val} is present.
+#'   }
+#'   When \code{spill_data} contains \code{bay1.per}, \code{bay1_spill_val} is
+#'   also included as a column.
 #'
 #' @importFrom dplyr filter arrange group_by slice ungroup transmute left_join
 #'   mutate case_when full_join summarise distinct count rename across
@@ -64,13 +78,14 @@ prep_ge_data <- function(dat_up,
                          lgs_spill_data   = NULL,
                          goj_site         = "GOJ",
                          min_mark_rkm     = 695,
+                         p_grs_prior      = 0.5,
+                         parent_strata    = NULL,
                          downstream_sites = c("GOJ","LMJ","MCJ","JDJ",
                                               "B2J","BCC","TWX",
                                               "PD5","PD6","PD7","PD8","PDW",
                                               "ICH","PDO","ESANIS","TTOWER",
                                               "ASMEBR","PIER3","MLRSNI",
-                                              "LMILIS","FOUNDI","CRESIS"),
-                         parent_strata    = NULL) {
+                                              "LMILIS","FOUNDI","CRESIS")) {
 
   species <- match.arg(species, c("chnk", "sthd"))
 
@@ -210,15 +225,7 @@ prep_ge_data <- function(dat_up,
     summarise(spill_val = mean(spill.per, na.rm = TRUE), .groups = "drop") %>%
     mutate(spill_val = replace_na(spill_val, 0))
 
-  # Bay-1 spill covariate for the p (GRS detection) regression.
-  # GRS is the bay-1 antenna; the fraction of spillway flow through bay 1
-  # (q_d) drives how many spillway fish are attracted to that bay and therefore
-  # how likely GRS is to detect them. Following Hance et al. (2024), bay-1
-  # spill is included as a second covariate in the p regression alongside
-  # total LGR spill, separating the effect of overall spill magnitude from the
-  # bay-1 attraction rate. Sourced from DART's percent_spill_spillbay1;
-  # rename to bay1.per before passing in spill_data. When present,
-  # fit_ge_model() automatically switches to the two-covariate p regression.
+  # Bay-1 spill covariate (optional)
   has_bay1 <- "bay1.per" %in% names(spill_df)
   if (has_bay1) {
     bay1_strat <- strat_assign %>%
@@ -249,6 +256,7 @@ prep_ge_data <- function(dat_up,
       select(stratum, lgs_spill_val)
   }
 
+  # Combine all stratum summaries
   ge_out <- full_join(psi_pool, lgr_counts, by = "stratum") %>%
     left_join(hist_counts,  by = "stratum") %>%
     left_join(spill_strat,  by = "stratum") %>%
@@ -262,6 +270,7 @@ prep_ge_data <- function(dat_up,
       mutate(bay1_spill_val = replace_na(bay1_spill_val, 0))
   }
 
+  # Nested hierarchy
   if (!is.null(parent_strata)) {
     pmap   <- as.data.frame(parent_strata)
     praw   <- pmap[[2]][match(ge_out$stratum, pmap[[1]])]
@@ -272,6 +281,48 @@ prep_ge_data <- function(dat_up,
     }
     ge_out$parent <- as.integer(factor(praw, levels = unique(praw)))
   }
+
+  # Pre-trap GE estimate for random walk initialization.
+  # Uses PIT detections from the week immediately prior to the first trap
+  # stratum. GRS detection probability is assumed (p_grs_prior, default 0.5)
+  # since the model has not yet been fit. The resulting logit-scale estimate
+  # is used as the prior mean for delta[1] in fit_ge_model(); the prior SD
+  # is fixed at 5 (nearly flat on the logit scale) so the week-13 likelihood
+  # dominates. If no pre-trap detections are found, delta[1] defaults to
+  # logit(0.5) = 0.
+  first_trap_week  <- min(ge_out$stratum, na.rm = TRUE)
+  pre_trap_week    <- first_trap_week - 1L
+
+  pre_trap_counts <- dat_up %>%
+    filter(site %in% c("GRJ", "GRS")) %>%
+    mutate(Week = as.integer(format(as.Date(det_date), "%V"))) %>%
+    filter(Week == pre_trap_week) %>%
+    group_by(site) %>%
+    summarise(n = n_distinct(tag), .groups = "drop") %>%
+    pivot_wider(names_from = site, values_from = n, values_fill = 0L)
+
+  if (!"GRJ" %in% names(pre_trap_counts)) pre_trap_counts$GRJ <- 0L
+  if (!"GRS" %in% names(pre_trap_counts)) pre_trap_counts$GRS <- 0L
+
+  n_grj <- pre_trap_counts$GRJ
+  n_grs <- pre_trap_counts$GRS
+
+  if ((n_grj + n_grs) == 0) {
+    message("No pre-trap PIT detections found in week ", pre_trap_week,
+            "; initialising delta[1] prior mean at logit(0.5) = 0.")
+    pre_trap_logit_ge <- 0
+  } else {
+    pre_trap_ge       <- n_grj / (n_grj + n_grs / p_grs_prior)
+    pre_trap_ge       <- min(max(pre_trap_ge, 0.01), 0.99)  # clamp from bounds
+    pre_trap_logit_ge <- qlogis(pre_trap_ge)
+    message(sprintf(
+      "Pre-trap GE (week %d): n_GRJ = %d, n_GRS = %d, assumed p_GRS = %.2f -> logit(GE) = %.3f",
+      pre_trap_week, n_grj, n_grs, p_grs_prior, pre_trap_logit_ge
+    ))
+  }
+
+  attr(ge_out, "pre_trap_logit_ge") <- pre_trap_logit_ge
+  attr(ge_out, "has_bay1")          <- has_bay1
 
   ge_out
 }
