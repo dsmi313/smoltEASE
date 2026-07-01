@@ -20,8 +20,6 @@
 #'
 #'   A pre-trap GE estimate is computed from PIT detections in the week
 #'   immediately prior to trap operation and stored as an attribute on the
-#'   returned data frame. This is used to initialize the random walk prior on
-#'   \code{delta[1]} in \code{\link{fit_ge_model}}.
 #'
 #' @param dat_up data frame of PIT tag detections. Required columns: \code{tag}
 #'   (character), \code{site} (character site code), \code{det_date} (Date).
@@ -49,19 +47,14 @@
 #'   Default \code{695}.
 #' @param parent_strata optional two-column data frame giving a coarser parent
 #'   grouping for a nested (two-level) GE fit. Default \code{NULL}.
-#' @param p_grs_prior numeric. Assumed GRS detection probability for computing
 #'   the pre-trap GE estimate from the week prior to trap operation. Used only
-#'   to initialize \code{delta[1]} in the random walk prior; does not enter the
 #'   JAGS likelihood. Default \code{0.5}.
 #' @param downstream_sites character vector of downstream site codes for Pool A.
 #'
 #' @return A data frame with one row per stratum. Two scalar attributes are
 #'   attached for use by \code{\link{fit_ge_model}}:
 #'   \itemize{
-#'     \item \code{pre_trap_logit_ge}: logit-scale GE estimate from the week
 #'       prior to trap operation, computed as
-#'       \code{qlogis(n_GRJ / (n_GRJ + n_GRS / p_grs_prior))}. Used as the
-#'       prior mean for \code{delta[1]} in the random walk.
 #'     \item \code{has_bay1}: logical, whether \code{bay1_spill_val} is present.
 #'   }
 #'   When \code{spill_data} contains \code{bay1.per}, \code{bay1_spill_val} is
@@ -78,7 +71,6 @@ prep_ge_data <- function(dat_up,
                          lgs_spill_data   = NULL,
                          goj_site         = "GOJ",
                          min_mark_rkm     = 695,
-                         p_grs_prior      = 0.5,
                          parent_strata    = NULL,
                          downstream_sites = c("GOJ","LMJ","MCJ","JDJ",
                                               "B2J","BCC","TWX",
@@ -282,47 +274,7 @@ prep_ge_data <- function(dat_up,
     ge_out$parent <- as.integer(factor(praw, levels = unique(praw)))
   }
 
-  # Pre-trap GE estimate for random walk initialization.
-  # Uses PIT detections from the week immediately prior to the first trap
-  # stratum. GRS detection probability is assumed (p_grs_prior, default 0.5)
-  # since the model has not yet been fit. The resulting logit-scale estimate
-  # is used as the prior mean for delta[1] in fit_ge_model(); the prior SD
-  # is fixed at 5 (nearly flat on the logit scale) so the week-13 likelihood
-  # dominates. If no pre-trap detections are found, delta[1] defaults to
-  # logit(0.5) = 0.
-  first_trap_week  <- min(ge_out$stratum, na.rm = TRUE)
-  pre_trap_week    <- first_trap_week - 1L
-
-  pre_trap_counts <- dat_up %>%
-    filter(site %in% c("GRJ", "GRS")) %>%
-    mutate(Week = as.integer(format(as.Date(det_date), "%V"))) %>%
-    filter(Week == pre_trap_week) %>%
-    group_by(site) %>%
-    summarise(n = n_distinct(tag), .groups = "drop") %>%
-    pivot_wider(names_from = site, values_from = n, values_fill = 0L)
-
-  if (!"GRJ" %in% names(pre_trap_counts)) pre_trap_counts$GRJ <- 0L
-  if (!"GRS" %in% names(pre_trap_counts)) pre_trap_counts$GRS <- 0L
-
-  n_grj <- pre_trap_counts$GRJ
-  n_grs <- pre_trap_counts$GRS
-
-  if ((n_grj + n_grs) == 0) {
-    message("No pre-trap PIT detections found in week ", pre_trap_week,
-            "; initialising delta[1] prior mean at logit(0.5) = 0.")
-    pre_trap_logit_ge <- 0
-  } else {
-    pre_trap_ge       <- n_grj / (n_grj + n_grs / p_grs_prior)
-    pre_trap_ge       <- min(max(pre_trap_ge, 0.01), 0.99)  # clamp from bounds
-    pre_trap_logit_ge <- qlogis(pre_trap_ge)
-    message(sprintf(
-      "Pre-trap GE (week %d): n_GRJ = %d, n_GRS = %d, assumed p_GRS = %.2f -> logit(GE) = %.3f",
-      pre_trap_week, n_grj, n_grs, p_grs_prior, pre_trap_logit_ge
-    ))
-  }
-
-  attr(ge_out, "pre_trap_logit_ge") <- pre_trap_logit_ge
-  attr(ge_out, "has_bay1")          <- has_bay1
+  attr(ge_out, "has_bay1") <- has_bay1
 
   ge_out
 }
