@@ -34,9 +34,6 @@
 #'   }
 #' @param spill_data data frame of daily LGR spill values. Required columns:
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric, percentage).
-#'   An optional column \code{bay1.per} (numeric, percentage of total flow
-#'   passing through spillbay 1) triggers the two-covariate p regression in
-#'   \code{\link{fit_ge_model}}.
 #' @param species one of \code{"chnk"} or \code{"sthd"}.
 #' @param lgs_spill_data data frame of daily LGS spill values. Required columns:
 #'   \code{Date} (Date or character) and \code{spill.per} (numeric, percentage).
@@ -51,14 +48,7 @@
 #'   JAGS likelihood. Default \code{0.5}.
 #' @param downstream_sites character vector of downstream site codes for Pool A.
 #'
-#' @return A data frame with one row per stratum. Two scalar attributes are
-#'   attached for use by \code{\link{fit_ge_model}}:
-#'   \itemize{
-#'       prior to trap operation, computed as
-#'     \item \code{has_bay1}: logical, whether \code{bay1_spill_val} is present.
-#'   }
-#'   When \code{spill_data} contains \code{bay1.per}, \code{bay1_spill_val} is
-#'   also included as a column.
+#' @return A data frame with one row per stratum.
 #'
 #' @importFrom dplyr filter arrange group_by slice ungroup transmute left_join
 #'   mutate case_when full_join summarise distinct count rename across
@@ -217,20 +207,6 @@ prep_ge_data <- function(dat_up,
     summarise(spill_val = mean(spill.per, na.rm = TRUE), .groups = "drop") %>%
     mutate(spill_val = replace_na(spill_val, 0))
 
-  # Bay-1 spill covariate (optional)
-  has_bay1 <- "bay1.per" %in% names(spill_df)
-  if (has_bay1) {
-    bay1_strat <- strat_assign %>%
-      left_join(spill_df[, c("Date", "bay1.per")], by = c("date" = "Date")) %>%
-      group_by(stratum) %>%
-      summarise(bay1_spill_val = mean(bay1.per, na.rm = TRUE), .groups = "drop") %>%
-      mutate(bay1_spill_val = replace_na(bay1_spill_val, 0))
-  } else {
-    message("bay1.per not found in spill_data; bay-1 spill will not be used as a ",
-            "covariate for p. Rename percent_spill_spillbay1 to bay1.per in your ",
-            "DART spill data to enable the two-covariate p regression.")
-  }
-
   # LGS spill covariate for phi regression
   if (!is.null(lgs_spill_data)) {
     lgs_df       <- lgs_spill_data
@@ -256,12 +232,6 @@ prep_ge_data <- function(dat_up,
     mutate(across(where(is.numeric), ~replace_na(., 0))) %>%
     arrange(stratum_idx)
 
-  if (has_bay1) {
-    ge_out <- ge_out %>%
-      left_join(bay1_strat, by = "stratum") %>%
-      mutate(bay1_spill_val = replace_na(bay1_spill_val, 0))
-  }
-
   # Nested hierarchy
   if (!is.null(parent_strata)) {
     pmap   <- as.data.frame(parent_strata)
@@ -273,8 +243,6 @@ prep_ge_data <- function(dat_up,
     }
     ge_out$parent <- as.integer(factor(praw, levels = unique(praw)))
   }
-
-  attr(ge_out, "has_bay1") <- has_bay1
 
   ge_out
 }
