@@ -28,6 +28,16 @@
 #'   through the coefficients rather than carrying independent daily noise (which
 #'   would understate uncertainty).
 #'
+#'   When \code{clip_to_ci = TRUE}, each observed stratum's \eqn{\psi} draws (and
+#'   the \code{alpha}/\code{beta} draws paired with them) are sampled only from
+#'   MCMC rows where that stratum's own \eqn{\psi} falls within its empirical
+#'   \code{ci_lower}/\code{ci_upper} quantile -- i.e. draws are pulled FROM the
+#'   95% CI, not winsorized to it afterward. This is a restriction on which
+#'   posterior rows get used, not a bound on extrapolation: a day's spill
+#'   covariate can still project \code{GE_d} outside its stratum's psi range,
+#'   since the daily value is computed from \code{eps} and that day's spill, not
+#'   copied directly from \code{psi}.
+#'
 #' @param ge_fit list returned by \code{\link{fit_ge_model}}.
 #' @param strat_assign data frame mapping each calendar date to a trap stratum.
 #'   Same object passed to \code{\link{prep_ge_data}}. Accepts the
@@ -48,18 +58,28 @@
 #'   each stratum using the fitted spill regression (see Details). When
 #'   \code{NULL} (default) GE is held constant within each stratum (the original
 #'   behaviour). Days with no matching spill value fall back to the stratum mean.
+#' @param clip_to_ci logical. When \code{TRUE}, each observed stratum's
+#'   \eqn{\psi}/\code{alpha}/\code{beta} draws are sampled only from MCMC rows
+#'   within that stratum's own \code{ci_lower}/\code{ci_upper} empirical
+#'   quantile of \eqn{\psi}, rather than uniformly from the full chain. Default
+#'   \code{FALSE} (original behaviour, draws from the full posterior).
+#' @param ci_lower,ci_upper quantiles defining the restricted row pool when
+#'   \code{clip_to_ci = TRUE}. Defaults 0.025 and 0.975.
 #'
 #' @return A data frame with \code{length(pass_dates)} rows and \code{B + 1}
 #'   columns: \code{SampleEndDate}, \code{boot_1}, \ldots, \code{boot_B}.
 #'   All GE values are in \eqn{[0, 1]}.
 #'
-#' @importFrom stats plogis qlogis rnorm
+#' @importFrom stats plogis qlogis rnorm quantile
 #' @export
 generate_ge_draws <- function(ge_fit,
                               strat_assign,
                               pass_dates,
                               B           = 2000,
-                              daily_spill = NULL) {
+                              daily_spill = NULL,
+                              clip_to_ci  = FALSE,
+                              ci_lower    = 0.025,
+                              ci_upper    = 0.975) {
 
   # Internal date parser: handles Date objects and the three character formats
   # that appear in SCRAPI/smoltEASE pipelines without requiring the caller to
@@ -101,12 +121,9 @@ generate_ge_draws <- function(ge_fit,
   samp_mat  <- do.call(rbind, lapply(ge_fit$samples, as.matrix))
   psi_cols  <- grep("^psi\\[", colnames(samp_mat))
   psi_mat   <- samp_mat[, psi_cols, drop = FALSE]   # n_mcmc x n_obs_strata
-
-  idx       <- sample(nrow(psi_mat), B, replace = nrow(psi_mat) < B)
-  psi_draws <- psi_mat[idx, , drop = FALSE]          # B x n_obs_strata
-  alpha_v   <- samp_mat[idx, grep("^alpha$",     colnames(samp_mat))]
-  beta_v    <- samp_mat[idx, grep("^beta$",      colnames(samp_mat))]
-  sigma_v   <- samp_mat[idx, grep("^sigma_psi$", colnames(samp_mat))]
+  alpha_col <- grep("^alpha$",     colnames(samp_mat))
+  beta_col  <- grep("^beta$",      colnames(samp_mat))
+  sigma_col <- grep("^sigma_psi$", colnames(samp_mat))
 
   n_all    <- nrow(ge_data)
   obs_idx  <- match(obs_strata$stratum_idx, ge_data$stratum_idx)
@@ -115,12 +132,43 @@ generate_ge_draws <- function(ge_fit,
   # Standardise stratum spill exactly as fit_ge_model did
   strat_spill_std <- (ge_data$spill_val - spill_mean) / spill_sd
 
+  # --- Row pool for each observed stratum ---
+  # clip_to_ci = TRUE restricts the MCMC rows drawn FROM, per stratum, to
+  # those where that stratum's own psi[s] falls in its empirical 95% CI --
+  # draws are pulled from the CI, not clipped to it after the fact. alpha/beta
+  # are pulled from the same restricted rows so each draw's eps stays
+  # internally consistent with the row it came from.
+  psi_draws <- matrix(NA_real_, nrow = B, ncol = length(obs_idx))
+  alpha_v   <- matrix(NA_real_, nrow = B, ncol = length(obs_idx))
+  beta_v    <- matrix(NA_real_, nrow = B, ncol = length(obs_idx))
+
+  for (s in seq_along(obs_idx)) {
+    if (clip_to_ci) {
+      q          <- quantile(psi_mat[, s], c(ci_lower, ci_upper), na.rm = TRUE)
+      valid_rows <- which(psi_mat[, s] >= q[1] & psi_mat[, s] <= q[2])
+      if (length(valid_rows) == 0) valid_rows <- seq_len(nrow(psi_mat))
+    } else {
+      valid_rows <- seq_len(nrow(psi_mat))
+    }
+    idx_s <- sample(valid_rows, B, replace = length(valid_rows) < B)
+    psi_draws[, s] <- psi_mat[idx_s, s]
+    alpha_v[, s]   <- samp_mat[idx_s, alpha_col]
+    beta_v[, s]    <- samp_mat[idx_s, beta_col]
+  }
+
+  # Zero-data strata: no per-stratum psi to restrict on, draw from the full
+  # chain as before.
+  idx_zero  <- sample(nrow(samp_mat), B, replace = nrow(samp_mat) < B)
+  alpha_z   <- samp_mat[idx_zero, alpha_col]
+  beta_z    <- samp_mat[idx_zero, beta_col]
+  sigma_v   <- samp_mat[idx_zero, sigma_col]
+
   # --- Per-stratum process deviation (eps) on the logit-psi scale ---
   eps_full    <- matrix(NA_real_, nrow = B, ncol = n_all)
   psi_clamped <- pmin(pmax(psi_draws, 1e-6), 1 - 1e-6)
   for (s in seq_along(obs_idx))
     eps_full[, obs_idx[s]] <- qlogis(psi_clamped[, s]) -
-      (alpha_v + beta_v * strat_spill_std[obs_idx[s]])
+      (alpha_v[, s] + beta_v[, s] * strat_spill_std[obs_idx[s]])
   for (zi in zero_idx)
     eps_full[, zi] <- rnorm(B, 0, sigma_v)
 
@@ -128,7 +176,7 @@ generate_ge_draws <- function(ge_fit,
   ge_strat <- matrix(NA_real_, nrow = B, ncol = n_all)
   ge_strat[, obs_idx] <- psi_draws
   for (zi in zero_idx)
-    ge_strat[, zi] <- plogis(alpha_v + beta_v * strat_spill_std[zi] + eps_full[, zi])
+    ge_strat[, zi] <- plogis(alpha_z + beta_z * strat_spill_std[zi] + eps_full[, zi])
   ge_strat <- pmin(pmax(ge_strat, 0), 1)
 
   # Season-mean fallback: n_pool-weighted mean across strata
@@ -155,11 +203,14 @@ generate_ge_draws <- function(ge_fit,
     ds$Date   <- as.Date(ds$Date)
     spill_day <- ds$spill.per[match(pass_dates_d, ds$Date)]
     for (d in which(valid)) {
-      s_col <- strat_idx_v[d]
-      x_d   <- spill_day[d]
+      s_col   <- strat_idx_v[d]
+      obs_pos <- match(s_col, obs_idx)   # position within obs_idx, NA if zero-data stratum
+      x_d     <- spill_day[d]
       if (is.na(x_d)) x_d <- ge_data$spill_val[s_col]
       std_d <- (x_d - spill_mean) / spill_sd
-      ge_days[, d] <- plogis(alpha_v + beta_v * std_d + eps_full[, s_col])
+      a_d <- if (is.na(obs_pos)) alpha_z else alpha_v[, obs_pos]
+      b_d <- if (is.na(obs_pos)) beta_z  else beta_v[, obs_pos]
+      ge_days[, d] <- plogis(a_d + b_d * std_d + eps_full[, s_col])
     }
     ge_days <- pmin(pmax(ge_days, 0), 1)
   }
