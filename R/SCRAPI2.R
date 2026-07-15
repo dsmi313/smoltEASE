@@ -68,6 +68,9 @@
 #'   matching the \code{strat} column (e.g. \code{Week}), the second giving the
 #'   stratum integer (e.g. \code{Collapse}). When supplied this overrides any
 #'   existing \code{Collapse} column in \code{passageData}. Default \code{NULL}.
+#' @param seed optional integer. When supplied, \code{set.seed(seed)} is called
+#'   before any random draws (GSI/GE column sampling, the bootstrap resampling
+#'   loop), making a run reproducible. Default \code{NULL} (no seeding).
 #'
 #' @importFrom stats rbinom quantile plogis
 #' @importFrom Hmisc mApply
@@ -81,8 +84,10 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
                     REARSTRAT = TRUE, alph = 0.1, B = 5000,
                     dateFormat = "%m/%d/%Y",
                     gsiDraws = NULL, fishID = "MasterID", n_point = 100,
-                    geDraws = NULL, strata = NULL)
+                    geDraws = NULL, strata = NULL, seed = NULL)
 {
+  if (!is.null(seed)) set.seed(seed)
+
   # ---- import data -------------------------------------------------------
   if(is.character(smoltData))   { All  <- read.csv(smoltData,  header = TRUE) } else { All  <- smoltData  }
   if(is.character(passageData)) { pass <- read.csv(passageData, header = TRUE) } else { pass <- passageData }
