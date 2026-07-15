@@ -68,6 +68,11 @@
 #'   posterior).
 #' @param ci_lower,ci_upper quantiles defining each stratum's marginal
 #'   interval when \code{clip_to_ci = TRUE}. Defaults 0.025 and 0.975.
+#' @param seed optional integer. When supplied, \code{set.seed(seed)} is
+#'   called immediately before row sampling, making the returned draws (and
+#'   the downstream \code{rnorm()} draws for zero-data strata) reproducible
+#'   across repeated calls with identical inputs. Default \code{NULL} (no
+#'   seeding, original behaviour).
 #'
 #' @return A data frame with \code{length(pass_dates)} rows and \code{B + 1}
 #'   columns: \code{SampleEndDate}, \code{boot_1}, \ldots, \code{boot_B}.
@@ -82,7 +87,8 @@ generate_ge_draws <- function(ge_fit,
                               daily_spill = NULL,
                               clip_to_ci  = FALSE,
                               ci_lower    = 0.025,
-                              ci_upper    = 0.975) {
+                              ci_upper    = 0.975,
+                              seed        = NULL) {
 
   # Internal date parser: handles Date objects and the three character formats
   # that appear in SCRAPI/smoltEASE pipelines without requiring the caller to
@@ -156,6 +162,7 @@ generate_ge_draws <- function(ge_fit,
     valid_rows <- seq_len(nrow(samp_mat))
   }
 
+  if (!is.null(seed)) set.seed(seed)
   idx <- sample(valid_rows, size = B, replace = length(valid_rows) < B)
 
   selected  <- samp_mat[idx, , drop = FALSE]
