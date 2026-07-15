@@ -71,8 +71,18 @@
 #'   multinomial likelihood. Default 1000. Sensitivity testing across
 #'   max_n = 200, 500, 1000, and 2000 on MY2025 steelhead showed psi/p/phi
 #'   point estimates stable across that range.
-#' @param n_iter number of MCMC iterations after burn-in per chain. Default 10000.
-#' @param n_burnin number of adaptation/burn-in iterations. Default 5000.
+#' @param n_iter number of MCMC iterations retained per chain, collected via
+#'   \code{rjags::coda.samples()} after adaptation and burn-in have both
+#'   completed. Default 30000.
+#' @param n_adapt number of adaptation iterations passed to
+#'   \code{rjags::jags.model()}'s \code{n.adapt} argument. JAGS uses this
+#'   phase to tune its own sampler internals (e.g. proposal step sizes); it is
+#'   not the same thing as burn-in, and finishing adaptation does not by
+#'   itself guarantee the chain has reached the target distribution. Default
+#'   5000.
+#' @param n_burnin number of burn-in iterations run via \code{rjags::update()}
+#'   after adaptation and discarded, before any samples are retained. Default
+#'   5000.
 #' @param n_chains number of MCMC chains. Default 3.
 #' @param n_thin thinning interval. Default 5.
 #' @param seed random seed. Default 42.
@@ -123,6 +133,7 @@ fit_ge_model <- function(ge_data,
                          route_effect = FALSE,
                          max_n    = 1000,
                          n_iter   = 30000,
+                         n_adapt  = 5000,
                          n_burnin = 5000,
                          n_chains = 3,
                          n_thin   = 5,
@@ -353,9 +364,16 @@ fit_ge_model <- function(ge_data,
     textConnection(model_string),
     data     = jags_data,
     n.chains = n_chains,
-    n.adapt  = n_burnin,
+    n.adapt  = n_adapt,
     quiet    = TRUE
   )
+
+  # Burn-in: run and discard n_burnin iterations, separate from and after
+  # adaptation. n.adapt above only tunes JAGS's own sampler internals; it
+  # does not guarantee the chain has reached the target distribution, so
+  # samples collected immediately after adaptation (with no burn-in step)
+  # can still include pre-convergence draws.
+  update(jags_fit, n.iter = n_burnin)
 
   samples <- rjags::coda.samples(
     jags_fit,
