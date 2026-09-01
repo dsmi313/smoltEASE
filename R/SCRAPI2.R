@@ -36,6 +36,36 @@
 #'   of draw columns is less than \code{B}, columns are sampled with replacement
 #'   (same policy as \code{gsiDraws}). Set to \code{NULL} (default) to treat GE
 #'   as fixed.
+#' @param pointEst how the \code{Estimate} column is computed. \code{"data"}
+#'   (default) matches \code{SCRAPI}: the estimator applied to the observed data
+#'   with no resampling, i.e. bootstrap row 1. \code{"median"} uses the median of
+#'   the bootstrap distribution instead, which is guaranteed to fall inside the
+#'   reported interval. \code{"data"} can fall outside the interval for small
+#'   subgroups; see Details.
+#'
+#' @details
+#' \strong{Guidance efficiency basis.} Abundance expands as
+#' \code{count / (rate * GE)}, so the quantity that averages across GE draws is
+#' \code{1/GE}, not \code{GE}. Under \code{pointEst = "data"} the point estimate
+#' therefore uses the harmonic mean of the daily GE draws, which is the value
+#' satisfying \code{1/GE_pe = mean(1/GE_draw)}. Using the arithmetic mean here
+#' would put the point estimate on a different basis from every bootstrap row
+#' and, by Jensen's inequality, systematically below the bootstrap distribution.
+#' The harmonic mean is at or below the arithmetic mean, and the gap widens as
+#' the GE posterior widens relative to its mean, so strata with poorly determined
+#' GE expand further under this correction.
+#'
+#' \strong{Point estimates outside the interval.} With \code{pointEst = "data"}
+#' the estimate is not guaranteed to lie between LCI and UCI. The composition and
+#' rearing bootstraps draw fish with probability proportional to \code{SR} and
+#' \code{True}, while the estimator weights fish by \code{1/SR} and
+#' \code{1/True}; the two cancel, so the expected resampled proportion is the
+#' unweighted sample proportion rather than the weighted one used for the point
+#' estimate. Where sampling rate varies widely within a stratum the bootstrap
+#' distribution can sit to one side of the point estimate. This behaviour is
+#' inherited from \code{SCRAPI} and is preserved here so the two functions agree.
+#' \code{pointEst = "median"} sidesteps it. A message is emitted listing any rows
+#' where the estimate falls outside its own interval.
 #'
 #' @return A list (returned invisibly) with two elements:
 #'   \item{CI}{matrix of point estimates and bootstrap confidence intervals,
@@ -72,7 +102,7 @@
 #'   before any random draws (GSI/GE column sampling, the bootstrap resampling
 #'   loop), making a run reproducible. Default \code{NULL} (no seeding).
 #'
-#' @importFrom stats rbinom quantile plogis
+#' @importFrom stats rbinom quantile plogis median
 #' @importFrom Hmisc mApply
 #' @export
 
@@ -84,8 +114,10 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
                     REARSTRAT = TRUE, alph = 0.1, B = 5000,
                     dateFormat = "%m/%d/%Y",
                     gsiDraws = NULL, fishID = "MasterID", n_point = 100,
-                    geDraws = NULL, strata = NULL, seed = NULL)
+                    geDraws = NULL, strata = NULL, seed = NULL,
+                    pointEst = c("data", "median"))
 {
+  pointEst <- match.arg(pointEst)
   if (!is.null(seed)) set.seed(seed)
 
   # ---- import data -------------------------------------------------------
@@ -136,6 +168,9 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
     n_ge_available <- ncol(geDraws) - 1L
     if(n_ge_available < 1L)
       stop("geDraws must have at least one draw column in addition to SampleEndDate")
+    ge_chk <- as.matrix(geDraws[, -1, drop = FALSE])
+    if(any(!is.finite(ge_chk)) || any(ge_chk <= 0, na.rm = TRUE))
+      stop("geDraws contains non-positive or non-finite values; 1/GE is undefined")
     if(n_ge_available < B) {
       message("geDraws has ", n_ge_available, " draw column(s) but B = ", B,
               "; sampling GE draws with replacement.")
@@ -153,6 +188,7 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
       "| Secondary:", Secondary, "\n")
   cat("\nWild adjustment by week:", REARSTRAT, "\n")
   cat("\nBootstrap iterations: B =", B, "| Alpha =", alph, "\n")
+  cat("\nPoint estimate:", pointEst, "\n")
   if(!is.null(gsiDraws))
     cat("\nGSI posterior uncertainty: ON  (n_point =", n_point, "draws for point estimate)\n")
   if(!is.null(geDraws))
@@ -266,17 +302,24 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
          paste(shQuote(lookup[missing_nm]), collapse = ", "), hint)
   }
 
+  # Daily point-estimate GE from the draws. Abundance expands as 1/GE, so the
+  # draws are averaged on the reciprocal scale; the harmonic mean is the value
+  # that puts the point estimate on the same basis as every bootstrap row.
+  ge_point <- function(gd, dates) {
+    m   <- as.matrix(gd[, -1, drop = FALSE])
+    idx <- match(dates, gd$SampleEndDate)
+    day <- 1 / rowMeans(1 / m, na.rm = TRUE)            # per-day harmonic mean
+    fb  <- 1 / mean(1 / colMeans(m, na.rm = TRUE))      # season fallback, matches
+    ifelse(is.na(idx), fb, day[idx])                    # the bootstrap fallback
+  }
+
   # When geDraws is supplied the bootstrap uses per-draw GE, but the initial
   # setup still needs a point-estimate GE column. If GuidanceEfficiency is
-  # absent, derive it from the row means of geDraws.
+  # absent, derive it from the draws.
   if (length(PASSguideff) == 0) {
     if (is.null(geDraws))
       stop("passageData is missing the '", guidance, "' column and no geDraws supplied.")
-    ge_date_idx <- match(as.Date(pass[, PASSdate], format = dateFormat),
-                         as.Date(geDraws$SampleEndDate, format = dateFormat))
-    ge_means    <- rowMeans(as.matrix(geDraws[, -1, drop = FALSE]), na.rm = TRUE)
-    pass[[guidance]] <- ifelse(is.na(ge_date_idx), mean(ge_means, na.rm = TRUE),
-                               ge_means[ge_date_idx])
+    pass[[guidance]] <- ge_point(geDraws, pass[[dat]])
     PASSguideff <- which(guidance == names(pass))
   }
 
@@ -288,17 +331,11 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   temp <- t(Cpattern); rownames(temp) <- c("Week","Strata")
   colnames(temp) <- rep("", ncol(temp)); print(temp)
 
-  # When geDraws is supplied, use posterior mean GE for the point estimate
-  # rather than the fixed GuidanceEfficiency column, so the point estimate
-  # and bootstrap CIs both reflect the Bayesian GE.
+  # When geDraws is supplied, use the harmonic-mean GE for the point estimate
+  # rather than the fixed GuidanceEfficiency column, so the point estimate and
+  # the bootstrap CIs are the same functional of the GE posterior.
   if (!is.null(geDraws)) {
-    ge_date_idx_pe <- match(as.Date(pass[, dat], format = dateFormat),
-                            as.Date(geDraws$SampleEndDate))
-    ge_means_pe    <- rowMeans(as.matrix(geDraws[, -1, drop = FALSE]), na.rm = TRUE)
-    ge_pe          <- ifelse(is.na(ge_date_idx_pe),
-                             mean(ge_means_pe, na.rm = TRUE),
-                             ge_means_pe[ge_date_idx_pe])
-
+    ge_pe     <- ge_point(geDraws, pass[[dat]])
     pass$true <- pass[, PASSrate] * ge_pe
   } else {
     pass$true <- pass[, PASSrate] * pass[, PASSguideff]
@@ -311,8 +348,7 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
 
   # ---- pre-compute geDraws daily matrix (n_days x B) ---------------------
   if(!is.null(geDraws)) {
-    ge_day_idx <- match(as.Date(pass[, dat], format = dateFormat),
-                        as.Date(geDraws$SampleEndDate, format = dateFormat))
+    ge_day_idx <- match(pass[[dat]], geDraws$SampleEndDate)
     ge_mat_raw <- as.matrix(geDraws[, -1, drop = FALSE])   # n_gedays x n_ge_available
     ge_season  <- colMeans(ge_mat_raw, na.rm = TRUE)[ge_idx_boot]  # season fallback per boot
     ge_day_mat <- matrix(ge_season, nrow = ndays, ncol = B, byrow = TRUE)
@@ -549,10 +585,12 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   if(!is.null(gsiDraws)) theta.b[1, ] <- pe_vec
 
   # ---- confidence intervals ----------------------------------------------
+  pointVec <- if(pointEst == "median") apply(theta.b, 2, median) else theta.b[1, ]
+
   CI <- matrix(0, nrow = p, ncol = 3)
   for(j in 1:p) {
     cij      <- quantile(theta.b[, j], c(alph/2, 1 - alph/2))
-    CI[j, ]  <- c(theta.b[1, j], cij)
+    CI[j, ]  <- c(pointVec[j], cij)
   }
   CI <- round(CI)
 
@@ -568,6 +606,15 @@ SCRAPI2 <- function(smoltData = NULL, Dat = "CollectionDate", Rr = "Rear",
   } else {
     rownames(answer) <- c("WildSmolts", as.character(Pgrps))
   }
+
+  # Flag rather than hide any row where the point estimate leaves its interval.
+  outside <- which(answer[, "Estimate"] < answer[, "LCI"] |
+                   answer[, "Estimate"] > answer[, "UCI"])
+  if(length(outside) > 0)
+    message("Estimate falls outside its interval for ", length(outside), " row(s): ",
+            paste(rownames(answer)[outside], collapse = ", "),
+            ". See ?SCRAPI2 Details; pointEst = 'median' avoids this.")
+
   cat("\n"); print(answer)
 
   # ---- write outputs (same layout as SCRAPI) -----------------------------
