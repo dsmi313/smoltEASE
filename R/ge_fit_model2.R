@@ -330,7 +330,7 @@ fit_ge_model2 <- function(ge_data, weeks = NULL,
   for (g in 1:n_strat) { mu_strat[g] ~ dnorm(alpha, tau_strat) }
   alpha ~ dt(0, pow(2, -2), 7)
   beta ~ dt(0, pow(1, -2), 7) T(, 0)
-  sigma_psi ~ dunif(0.05, 3)
+  sigma_psi ~ dnorm(0, pow(0.5, -2)) T(0,)
   sigma_strat ~ dunif(0.05, 3)
 
   # Spillway-array detection: the same nesting, separate parameters.
