@@ -22,6 +22,9 @@ Imports:
     tidyr,
     Hmisc,
     stats
+Suggests:
+    rjags,
+    coda
 License: GPL-3
 URL: https://github.com/dsmi313/smoltEASE
 BugReports: https://github.com/dsmi313/smoltEASE/issues
