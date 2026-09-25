@@ -251,8 +251,9 @@ fit_ge_rear_model2 <- function(
     lik_s = as.integer(lik[, "col"]), parent = as.integer(parent),
     n_strat = n_strat, lgr_spill_std = lgr_std,
     outflow_std = outflow_std, interaction_std = interaction_std,
-    lgs_spill_std = lgs_std, rear_sd_scale = rear_sd_scale
+    lgs_spill_std = lgs_std
   ), phi_prior)
+  if (R > 1L) jd$rear_sd_scale <- rear_sd_scale
 
   delta_block <- if (delta_mode == "free") {
     jd$delta_sd <- delta_sd
