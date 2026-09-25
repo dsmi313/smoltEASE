@@ -23,7 +23,7 @@ This brings juvenile estimation into alignment with the EASE framework used for 
 ## Installation
 
 ```r
-remotes::install_github("dsmi313/smoltEASE")
+remotes::install_github("dsmi313/smoltEASE",upgrade = F)
 ```
 
 ## Usage
