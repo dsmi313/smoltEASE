@@ -2,8 +2,9 @@
 #'
 #' Extracts one rear group's weekly guidance-efficiency posterior from
 #' [fit_ge_rear_model2()] and returns coherent posterior columns for SCRAPI2.
-#' When daily spill is supplied, each draw retains its fitted weekly residual
-#' while replacing weekly spill with observed daily spill.
+#' When daily covariates are supplied, each draw retains its fitted weekly
+#' residual while replacing weekly percent spill, outflow, and their interaction
+#' with the observed daily values.
 #'
 #' @param ge_fit Result from [fit_ge_rear_model2()].
 #' @param rear_type Rear group to extract. Defaults to the fit's target rear.
@@ -12,16 +13,19 @@
 #'   `date`/`stratum_idx` columns.
 #' @param pass_dates Passage-data dates in output row order.
 #' @param B Number of posterior columns returned.
-#' @param daily_spill Optional data frame containing `Date` and `spill.per`.
-#'   When supplied, daily spill is applied using the fitted spill slope.
+#' @param daily_spill Optional daily-covariate data frame containing `Date`,
+#'   `spill.per`, and `outflow`. The argument retains its historical name for
+#'   compatibility. `outflow` should be the daily mean of the hourly flow rate,
+#'   not a sum of hourly rates.
 #' @param clip_to_ci Restrict sampling to complete MCMC rows where all weekly
 #'   psi values for `rear_type` fall inside their marginal intervals. Default
 #'   `FALSE`; full-posterior sampling is recommended for uncertainty propagation.
 #' @param ci_lower,ci_upper Marginal bounds used only when `clip_to_ci = TRUE`.
 #' @param strict_dates Stop when a passage date has no model-row assignment.
 #'   Default `TRUE`.
-#' @param strict_daily_spill When daily spill is supplied, stop if any modeled
-#'   passage date lacks a daily value. If `FALSE`, use that week's fitted mean.
+#' @param strict_daily_spill When daily covariates are supplied, stop if any
+#'   modeled passage date lacks spill or outflow. If `FALSE`, use that week's
+#'   fitted values. The argument retains its historical name for compatibility.
 #' @param seed Optional sampling seed.
 #'
 #' @return Data frame with `SampleEndDate` followed by `boot_1` through
@@ -32,7 +36,7 @@
 #' ge_W <- generate_rear_ge_draws(
 #'   rear_fit, rear_type = "W",
 #'   pass_dates = passageData$SampleEndDate,
-#'   B = 5000, daily_spill = lgr_daily_spill,
+#'   B = 5000, daily_spill = lgr_daily_covariates,
 #'   clip_to_ci = FALSE, seed = 11
 #' )
 #' }
@@ -87,7 +91,8 @@ generate_rear_ge_draws <- function(
          call. = FALSE)
   }
   needed <- c("samples", "rear_levels", "weeks", "spill_mean", "spill_sd",
-              "lgr_spill_std")
+              "lgr_spill_std", "outflow_mean", "outflow_sd", "outflow_std",
+              "interaction_std")
   missing <- setdiff(needed, names(ge_fit))
   if (length(missing)) {
     stop("ge_fit is missing: ", paste(missing, collapse = ", "), ".",
@@ -127,8 +132,9 @@ generate_rear_ge_draws <- function(
 
   mat <- do.call(rbind, lapply(ge_fit$samples, as.matrix))
   psi_cols <- paste0("psi[", r, ",", seq_along(ge_fit$weeks), "]")
-  if (!all(c(psi_cols, "beta") %in% colnames(mat))) {
-    stop("The requested rear-specific psi or beta draws are absent.",
+  coef_cols <- c("beta", "beta_outflow", "beta_interaction")
+  if (!all(c(psi_cols, coef_cols) %in% colnames(mat))) {
+    stop("The requested rear-specific psi or covariate draws are absent.",
          call. = FALSE)
   }
   psi_all <- mat[, psi_cols, drop = FALSE]
@@ -148,6 +154,8 @@ generate_rear_ge_draws <- function(
   selected <- mat[draw_id, , drop = FALSE]
   psi <- pmin(pmax(selected[, psi_cols, drop = FALSE], 1e-9), 1 - 1e-9)
   beta <- selected[, "beta"]
+  beta_outflow <- selected[, "beta_outflow"]
+  beta_interaction <- selected[, "beta_interaction"]
 
   # Weighted season fallback is used only when strict_dates = FALSE.
   target_counts <- ge_fit$N_seen[r, ]
@@ -162,32 +170,43 @@ generate_rear_ge_draws <- function(
     for (d in which(valid_s)) ge[d, ] <- psi[, s[d]]
   } else {
     if (!is.data.frame(daily_spill) ||
-        !all(c("Date", "spill.per") %in% names(daily_spill))) {
-      stop("daily_spill must contain Date and spill.per columns.", call. = FALSE)
+        !all(c("Date", "spill.per", "outflow") %in% names(daily_spill))) {
+      stop("daily_spill must contain Date, spill.per, and outflow columns.",
+           call. = FALSE)
     }
     spill_dates <- parse_dates(daily_spill$Date, "daily spill date")
     if (anyDuplicated(spill_dates)) {
       stop("daily_spill contains duplicate dates.", call. = FALSE)
     }
     spill <- suppressWarnings(as.numeric(daily_spill$spill.per))
+    outflow <- suppressWarnings(as.numeric(daily_spill$outflow))
     spill_day <- spill[match(pass_dates_d, spill_dates)]
-    missing_spill <- valid_s & !is.finite(spill_day)
+    outflow_day <- outflow[match(pass_dates_d, spill_dates)]
+    missing_spill <- valid_s &
+      (!is.finite(spill_day) | !is.finite(outflow_day))
     if (strict_daily_spill && any(missing_spill)) {
       stop(sum(missing_spill),
-           " modeled passage date(s) lack finite daily spill values.",
+           " modeled passage date(s) lack finite daily spill or outflow values.",
            call. = FALSE)
     }
     for (d in which(valid_s)) {
       ss <- s[d]
-      x <- spill_day[d]
-      if (!is.finite(x)) {
-        x_std <- ge_fit$lgr_spill_std[ss]
+      spill_x <- spill_day[d]
+      flow_x <- outflow_day[d]
+      if (!is.finite(spill_x) || !is.finite(flow_x)) {
+        spill_std <- ge_fit$lgr_spill_std[ss]
+        flow_std <- ge_fit$outflow_std[ss]
       } else {
-        x_std <- (x - ge_fit$spill_mean) / ge_fit$spill_sd
+        spill_std <- (spill_x - ge_fit$spill_mean) / ge_fit$spill_sd
+        flow_std <- (flow_x - ge_fit$outflow_mean) / ge_fit$outflow_sd
       }
+      interaction_std <- spill_std * flow_std
       ge[d, ] <- stats::plogis(
         stats::qlogis(psi[, ss]) +
-          beta * (x_std - ge_fit$lgr_spill_std[ss]))
+          beta * (spill_std - ge_fit$lgr_spill_std[ss]) +
+          beta_outflow * (flow_std - ge_fit$outflow_std[ss]) +
+          beta_interaction *
+            (interaction_std - ge_fit$interaction_std[ss]))
     }
   }
   ge <- pmin(pmax(ge, 0), 1)
