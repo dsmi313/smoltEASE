@@ -2,7 +2,9 @@
 #'
 #' Fits the six-cell guidance-efficiency model jointly to two or more rear-type
 #' groups. Weekly guidance efficiency (psi) and transport probability are
-#' rear-specific. The seasonal hierarchy, spill response, spillway detection,
+#' rear-specific. The GE regression contains standardized percent spill,
+#' standardized outflow, and their interaction. The seasonal hierarchy,
+#' spillway detection,
 #' downstream recovery, and route offset are shared across rear groups. Rear
 #' effects on logit(psi) are centered and partially pooled.
 #'
@@ -11,6 +13,10 @@
 #'   W = ge_W, U = ge_U)`. Every group must use the same weeks and spill series.
 #' @param weeks Increasing ISO week numbers. If `NULL`, they are read from the
 #'   target-rear object or from count-matrix row names such as `wk13`.
+#' @param outflow Optional numeric vector of mean LGR outflow, one value per
+#'   modeled week and in the same row order as `ge_data`. When `NULL`, use
+#'   `ge_data[[target_rear]]$lgr_outflow`. Values are standardized internally.
+#'   Use a rate (for example, mean hourly flow), not a sum of rates.
 #' @param target_rear Rear code whose parent hierarchy supplies the default
 #'   grouping and whose GE will usually be passed to SCRAPI2. Default `"W"`.
 #' @param parent Optional common parent-group vector. When `NULL`, the parent
@@ -42,6 +48,7 @@
 #' fit <- fit_ge_rear_model2(
 #'   list(H = ge_H, W = ge_W, U = ge_U),
 #'   weeks = 13:26,
+#'   outflow = weekly_mean_outflow,
 #'   target_rear = "W",
 #'   n_iter = 50000,
 #'   n_burnin = 20000
@@ -52,6 +59,7 @@
 fit_ge_rear_model2 <- function(
     ge_data,
     weeks = NULL,
+    outflow = NULL,
     target_rear = "W",
     parent = NULL,
     delta_mode = c("free", "fixed"),
@@ -101,10 +109,10 @@ fit_ge_rear_model2 <- function(
   if (!is.logical(verbose) || length(verbose) != 1L || is.na(verbose)) {
     stop("verbose must be TRUE or FALSE.", call. = FALSE)
   }
-  if (!is.list(ge_data) || length(ge_data) < 2L ||
+  if (!is.list(ge_data) || length(ge_data) < 1L ||
       is.null(names(ge_data)) || any(!nzchar(names(ge_data))) ||
       anyDuplicated(names(ge_data))) {
-    stop("ge_data must be a uniquely named list containing at least two rear groups.",
+    stop("ge_data must be a uniquely named list containing at least one rear group.",
          call. = FALSE)
   }
   rear_levels <- names(ge_data)
@@ -189,6 +197,16 @@ fit_ge_rear_model2 <- function(
   lgs_sd <- stats::sd(lgs)
   lgr_std <- (lgr - lgr_mean) / lgr_sd
   lgs_std <- (lgs - lgs_mean) / lgs_sd
+  if (is.null(outflow)) outflow <- target$lgr_outflow
+  if (!is.numeric(outflow) || length(outflow) != S ||
+      any(!is.finite(outflow)) || !is.finite(stats::sd(outflow)) ||
+      stats::sd(outflow) == 0) {
+    stop("outflow must contain S finite values with nonzero SD.", call. = FALSE)
+  }
+  outflow_mean <- mean(outflow)
+  outflow_sd <- stats::sd(outflow)
+  outflow_std <- (outflow - outflow_mean) / outflow_sd
+  interaction_std <- lgr_std * outflow_std
 
   if (is.null(parent)) parent <- target$parent
   if (is.null(parent)) parent <- seq_len(S)
@@ -232,6 +250,7 @@ fit_ge_rear_model2 <- function(
     N_lik = nrow(lik), lik_r = as.integer(lik[, "row"]),
     lik_s = as.integer(lik[, "col"]), parent = as.integer(parent),
     n_strat = n_strat, lgr_spill_std = lgr_std,
+    outflow_std = outflow_std, interaction_std = interaction_std,
     lgs_spill_std = lgs_std, rear_sd_scale = rear_sd_scale
   ), phi_prior)
 
@@ -247,20 +266,32 @@ fit_ge_rear_model2 <- function(
     "for (s in 1:S) { delta[s] <- 0 }"
   }
 
+  rear_block <- if (R > 1L) {
+    "
+    tau_rear <- pow(sigma_rear_psi + 1.0E-6, -2)
+    for (r in 1:R) { rear_psi_raw[r] ~ dnorm(0, tau_rear) }
+    rear_mean <- mean(rear_psi_raw[])
+    for (r in 1:R) { rear_psi[r] <- rear_psi_raw[r] - rear_mean }
+    sigma_rear_psi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+    "
+  } else {
+    "rear_psi[1] <- 0"
+  }
+
   model_string <- paste0("model {
     eps <- 1.0E-9
 
     # Rear-specific GE with centered, partially pooled rear effects.
     tau_psi <- pow(sigma_psi, -2)
     tau_strat <- pow(sigma_strat, -2)
-    tau_rear <- pow(sigma_rear_psi + 1.0E-6, -2)
-    for (r in 1:R) { rear_psi_raw[r] ~ dnorm(0, tau_rear) }
-    rear_mean <- mean(rear_psi_raw[])
+    ", rear_block, "
     for (r in 1:R) {
-      rear_psi[r] <- rear_psi_raw[r] - rear_mean
       for (s in 1:S) {
         logit_psi[r,s] ~ dnorm(
-          mu_strat[parent[s]] + beta * lgr_spill_std[s] + rear_psi[r],
+          mu_strat[parent[s]] + rear_psi[r] +
+          beta * lgr_spill_std[s] +
+          beta_outflow * outflow_std[s] +
+          beta_interaction * interaction_std[s],
           tau_psi)
         psi[r,s] <- ilogit(logit_psi[r,s])
       }
@@ -268,9 +299,10 @@ fit_ge_rear_model2 <- function(
     for (g in 1:n_strat) { mu_strat[g] ~ dnorm(alpha, tau_strat) }
     alpha ~ dt(0, pow(2, -2), 7)
     beta ~ dt(0, pow(1, -2), 7) T(, 0)
+    beta_outflow ~ dt(0, pow(1, -2), 7)
+    beta_interaction ~ dt(0, pow(1, -2), 7)
     sigma_psi ~ dnorm(0, pow(0.5, -2)) T(0,)
     sigma_strat ~ dunif(0.05, 3)
-    sigma_rear_psi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
 
     # Shared spillway-array detection.
     tau_p <- pow(sigma_p, -2)
@@ -325,11 +357,13 @@ fit_ge_rear_model2 <- function(
     }
   }
   monitor <- c(
-    "psi", "rear_psi", "sigma_rear_psi", "p", "phi_S", "phi_B",
+    "psi", "p", "phi_S", "phi_B",
     "trans", "pi_obs", "alpha", "beta", "sigma_psi", "mu_strat",
+    "beta_outflow", "beta_interaction",
     "sigma_strat", "alpha_p", "beta_p", "sigma_p", "mu_strat_p",
     "sigma_strat_p", "alpha_phi", "beta_phi", "sigma_phi"
   )
+  if (R > 1L) monitor <- c(monitor, "rear_psi", "sigma_rear_psi")
   if (delta_mode == "free") {
     monitor <- c(monitor, "delta", "delta0", "sigma_delta")
   }
@@ -382,7 +416,7 @@ fit_ge_rear_model2 <- function(
   )
   bad <- !is.finite(summary$Rhat) | summary$Rhat > rhat_threshold
   core <- grepl(
-    "^psi\\[|^rear_psi\\[|^(alpha|beta|sigma_psi|sigma_rear_psi)$",
+    "^psi\\[|^rear_psi\\[|^(alpha|beta|beta_outflow|beta_interaction|sigma_psi|sigma_rear_psi)$",
     summary$parameter)
   diagnostics <- list(
     method = "classical coda R-hat, autoburnin=FALSE; coda ESS",
@@ -414,8 +448,10 @@ fit_ge_rear_model2 <- function(
   }))
 
   rear_summary <- summary[grepl("^rear_psi\\[", summary$parameter), , drop = FALSE]
-  rear_summary$rear <- rear_levels
-  rear_summary <- rear_summary[, c("rear", setdiff(names(rear_summary), "rear"))]
+  if (R > 1L) {
+    rear_summary$rear <- rear_levels
+    rear_summary <- rear_summary[, c("rear", setdiff(names(rear_summary), "rear"))]
+  }
 
   result <- list(
     samples = samples, summary = summary, diagnostics = diagnostics,
@@ -424,6 +460,9 @@ fit_ge_rear_model2 <- function(
     weeks = weeks, parent = parent, n = n, N_seen = N_seen,
     spill_mean = lgr_mean, spill_sd = lgr_sd,
     lgr_spill_pct = lgr, lgr_spill_std = lgr_std,
+    outflow_mean = outflow_mean, outflow_sd = outflow_sd,
+    outflow = as.numeric(outflow), outflow_std = outflow_std,
+    interaction_std = interaction_std,
     lgs_spill_mean = lgs_mean, lgs_spill_sd = lgs_sd,
     strat_assign = data.frame(Week = weeks, Collapse = seq_len(S)),
     model_string = model_string, jags_data = jd,
@@ -431,7 +470,8 @@ fit_ge_rear_model2 <- function(
       model = "six-cell rear-type partial pooling",
       delta_mode = delta_mode, delta_sd = delta_sd,
       rear_sd_scale = rear_sd_scale, phi_prior_source = prior_source,
-      shared_processes = c("seasonal pattern", "spill slope", "p",
+      psi_covariates = c("percent spill", "outflow", "spill x outflow"),
+      shared_processes = c("seasonal pattern", "covariate slopes", "p",
                            "phi_S", "phi_B", "delta"),
       rear_specific_processes = c("psi", "trans"),
       n_iter = n_iter, n_adapt = n_adapt, n_burnin = n_burnin,
