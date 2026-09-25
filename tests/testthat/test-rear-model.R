@@ -90,16 +90,35 @@ test_that("daily projection carries the spill-by-outflow interaction", {
 })
 
 
-test_that("hierarchical fit makes observation processes rear-specific", {
+test_that("hierarchical fit supports full and reduced rear structures", {
   fn <- paste(deparse(body(fit_ge_rear_model2)), collapse = "\n")
+  expect_match(fn, "rear_structure", fixed = TRUE)
+  expect_match(fn, "full_structure", fixed = TRUE)
   expect_match(fn, "p\\[r,s\\]", fixed = FALSE)
   expect_match(fn, "phi_S\\[r,s\\]", fixed = FALSE)
-  expect_match(fn, "phi_B\\[r,s\\]", fixed = FALSE)
-  expect_match(fn, "delta\\[r,s\\]", fixed = FALSE)
+  expect_match(fn, "phi_S\\[s\\]", fixed = FALSE)
   expect_match(fn, "rear_p\\[r\\]", fixed = FALSE)
   expect_match(fn, "rear_phi\\[r\\]", fixed = FALSE)
-  expect_match(fn, "rear_delta\\[r\\]", fixed = FALSE)
-  expect_false(grepl("p\\[s\\]", fn))
-  expect_false(grepl("phi_S\\[s\\]", fn))
-  expect_false(grepl("phi_B\\[s\\]", fn))
+  expect_false(grepl("beta_interaction ~", fn, fixed = TRUE))
+})
+
+test_that("new additive fits need no interaction column", {
+  skip_if_not_installed("coda")
+  m <- cbind(`psi[1,1]` = rep(.2, 4), beta = rep(-.5, 4),
+             beta_outflow = rep(.25, 4))
+  fit <- list(
+    samples = coda::mcmc.list(coda::mcmc(m), coda::mcmc(m)),
+    rear_levels = "W", target_rear = "W", weeks = 13,
+    spill_mean = 80, spill_sd = 10, lgr_spill_std = 0,
+    outflow_mean = 90, outflow_sd = 10, outflow_std = 0,
+    N_seen = matrix(10, nrow = 1),
+    strat_assign = data.frame(Week = 13, Collapse = 1)
+  )
+  date <- as.Date("2025-03-26")
+  out <- generate_rear_ge_draws(
+    fit, pass_dates = date, B = 4,
+    daily_spill = data.frame(Date = date, spill.per = 90, outflow = 100),
+    seed = 1)
+  expected <- plogis(qlogis(.2) - .5 + .25)
+  expect_equal(as.numeric(out[1, -1]), rep(expected, 4))
 })
