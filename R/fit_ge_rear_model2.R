@@ -1,12 +1,13 @@
 #' Fit a rear-type hierarchical six-cell GE model
 #'
 #' Fits the six-cell guidance-efficiency model jointly to two or more rear-type
-#' groups. Weekly guidance efficiency (psi), spillway-array detection (p),
-#' downstream recovery (phi_S and phi_B), route offset, and transport
-#' probability are rear-specific. Each rear effect is centered and partially
-#' pooled, while seasonal structure and covariate slopes are shared. The GE
-#' regression contains standardized percent spill, standardized outflow, and
-#' their interaction.
+#' groups. Guidance efficiency (psi), spillway-array detection (p), and
+#' transport probability are rear-specific and partially pooled. With
+#' `rear_structure = "full"`, downstream recovery (phi_S and phi_B) and the
+#' route offset are also rear-specific. With `rear_structure = "reduced"`,
+#' downstream recovery and the route offset are shared. Seasonal structure and
+#' covariate slopes are shared. The GE regression is additive in standardized
+#' percent spill and standardized outflow.
 #'
 #' @param ge_data Named list of six-cell data lists returned by
 #'   [prep_ge_data2()], one per rear group. For example, `list(H = ge_H,
@@ -21,6 +22,10 @@
 #'   grouping and whose GE will usually be passed to SCRAPI2. Default `"W"`.
 #' @param parent Optional common parent-group vector. When `NULL`, the parent
 #'   vector from `ge_data[[target_rear]]` is used.
+#' @param rear_structure `"full"` estimates rear-specific `psi`, `p`,
+#'   `phi_S`, `phi_B`, `delta`, and `trans`. `"reduced"` estimates
+#'   rear-specific `psi`, `p`, and `trans`, while sharing `phi_S`,
+#'   `phi_B`, and `delta`.
 #' @param delta_mode Estimate (`"free"`) or fix (`"fixed"`) the route offset.
 #' @param delta_sd Prior SD for the mean route offset when estimated.
 #' @param rear_sd_scale Half-normal prior scale for the among-rear SDs on the
@@ -63,6 +68,7 @@ fit_ge_rear_model2 <- function(
     outflow = NULL,
     target_rear = "W",
     parent = NULL,
+    rear_structure = c("full", "reduced"),
     delta_mode = c("free", "fixed"),
     delta_sd = 0.5,
     rear_sd_scale = 1,
@@ -76,6 +82,7 @@ fit_ge_rear_model2 <- function(
     rhat_threshold = 1.01,
     verbose = TRUE) {
 
+  rear_structure <- match.arg(rear_structure)
   delta_mode <- match.arg(delta_mode)
   whole <- function(x, name, minimum = 0L) {
     if (!is.numeric(x) || length(x) != 1L || !is.finite(x) ||
@@ -207,7 +214,6 @@ fit_ge_rear_model2 <- function(
   outflow_mean <- mean(outflow)
   outflow_sd <- stats::sd(outflow)
   outflow_std <- (outflow - outflow_mean) / outflow_sd
-  interaction_std <- lgr_std * outflow_std
 
   if (is.null(parent)) parent <- target$parent
   if (is.null(parent)) parent <- seq_len(S)
@@ -251,12 +257,13 @@ fit_ge_rear_model2 <- function(
     N_lik = nrow(lik), lik_r = as.integer(lik[, "row"]),
     lik_s = as.integer(lik[, "col"]), parent = as.integer(parent),
     n_strat = n_strat, lgr_spill_std = lgr_std,
-    outflow_std = outflow_std, interaction_std = interaction_std,
-    lgs_spill_std = lgs_std
+    outflow_std = outflow_std, lgs_spill_std = lgs_std
   ), phi_prior)
   if (R > 1L) jd$rear_sd_scale <- rear_sd_scale
 
-  delta_block <- if (delta_mode == "free") {
+  full_structure <- rear_structure == "full"
+
+  delta_block <- if (delta_mode == "free" && full_structure) {
     jd$delta_sd <- delta_sd
     "
     delta0 ~ dnorm(0, pow(delta_sd, -2))
@@ -268,11 +275,22 @@ fit_ge_rear_model2 <- function(
       }
     }
     "
-  } else {
+  } else if (delta_mode == "free") {
+    jd$delta_sd <- delta_sd
+    "
+    delta0 ~ dnorm(0, pow(delta_sd, -2))
+    sigma_delta ~ dunif(0, 3)
+    tau_delta <- pow(sigma_delta + 1.0E-6, -2)
+    for (s in 1:S) { delta[s] ~ dnorm(delta0, tau_delta) }
+    "
+  } else if (full_structure) {
     "for (r in 1:R) { for (s in 1:S) { delta[r,s] <- 0 } }"
+  } else {
+    "for (s in 1:S) { delta[s] <- 0 }"
   }
 
-  rear_delta_block <- if (R > 1L && delta_mode == "free") {
+  rear_delta_block <- if (R > 1L && full_structure &&
+                          delta_mode == "free") {
     "
     tau_rear_delta <- pow(sigma_rear_delta + 1.0E-6, -2)
     for (r in 1:R) { rear_delta_raw[r] ~ dnorm(0, tau_rear_delta) }
@@ -282,11 +300,13 @@ fit_ge_rear_model2 <- function(
     }
     sigma_rear_delta ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
     "
-  } else {
+  } else if (full_structure) {
     "for (r in 1:R) { rear_delta[r] <- 0 }"
+  } else {
+    ""
   }
 
-  rear_block <- if (R > 1L) {
+  rear_block <- if (R > 1L && full_structure) {
     "
     tau_rear_psi <- pow(sigma_rear_psi + 1.0E-6, -2)
     tau_rear_p <- pow(sigma_rear_p + 1.0E-6, -2)
@@ -308,18 +328,93 @@ fit_ge_rear_model2 <- function(
     sigma_rear_p ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
     sigma_rear_phi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
     "
-  } else {
+  } else if (R > 1L) {
+    "
+    tau_rear_psi <- pow(sigma_rear_psi + 1.0E-6, -2)
+    tau_rear_p <- pow(sigma_rear_p + 1.0E-6, -2)
+    for (r in 1:R) {
+      rear_psi_raw[r] ~ dnorm(0, tau_rear_psi)
+      rear_p_raw[r] ~ dnorm(0, tau_rear_p)
+    }
+    rear_psi_mean <- mean(rear_psi_raw[])
+    rear_p_mean <- mean(rear_p_raw[])
+    for (r in 1:R) {
+      rear_psi[r] <- rear_psi_raw[r] - rear_psi_mean
+      rear_p[r] <- rear_p_raw[r] - rear_p_mean
+    }
+    sigma_rear_psi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+    sigma_rear_p ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+    "
+  } else if (full_structure) {
     "
     rear_psi[1] <- 0
     rear_p[1] <- 0
     rear_phi[1] <- 0
+    "
+  } else {
+    "
+    rear_psi[1] <- 0
+    rear_p[1] <- 0
+    "
+  }
+
+  phi_block <- if (full_structure) {
+    paste0("
+    # Rear-specific downstream recovery and route offset.
+    tau_phi <- pow(sigma_phi, -2)
+    for (r in 1:R) {
+      for (s in 1:S) {
+        logit_phi_S[r,s] ~ dnorm(
+          alpha_phi + rear_phi[r] + beta_phi * lgs_spill_std[s], tau_phi)
+        phi_S[r,s] <- ilogit(logit_phi_S[r,s])
+        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])
+      }
+    }
+    alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
+    beta_phi ~ dnorm(beta_phi_mean, pow(beta_phi_sd, -2)) T(, 0)
+    sigma_phi ~ dunif(0.05, 3)
+    ", rear_delta_block, "
+    ", delta_block, "
+    ")
+  } else {
+    paste0("
+    # Shared downstream recovery and route offset.
+    tau_phi <- pow(sigma_phi, -2)
+    for (s in 1:S) {
+      logit_phi_S[s] ~ dnorm(
+        alpha_phi + beta_phi * lgs_spill_std[s], tau_phi)
+      phi_S[s] <- ilogit(logit_phi_S[s])
+      phi_B[s] <- ilogit(logit_phi_S[s] - delta[s])
+    }
+    alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
+    beta_phi ~ dnorm(beta_phi_mean, pow(beta_phi_sd, -2)) T(, 0)
+    sigma_phi ~ dunif(0.05, 3)
+    ", delta_block, "
+    ")
+  }
+
+  observation_block <- if (full_structure) {
+    "
+        pi_raw[r,s,1] <- psi[r,s] * (1-trans[r,s]) * (1-phi_B[r,s]) + eps
+        pi_raw[r,s,2] <- psi[r,s] * (1-trans[r,s]) * phi_B[r,s] + eps
+        pi_raw[r,s,3] <- (1-psi[r,s]) * p[r,s] * (1-phi_S[r,s]) + eps
+        pi_raw[r,s,4] <- (1-psi[r,s]) * p[r,s] * phi_S[r,s] + eps
+        pi_raw[r,s,5] <- (1-psi[r,s]) * (1-p[r,s]) * phi_S[r,s] + eps
+    "
+  } else {
+    "
+        pi_raw[r,s,1] <- psi[r,s] * (1-trans[r,s]) * (1-phi_B[s]) + eps
+        pi_raw[r,s,2] <- psi[r,s] * (1-trans[r,s]) * phi_B[s] + eps
+        pi_raw[r,s,3] <- (1-psi[r,s]) * p[r,s] * (1-phi_S[s]) + eps
+        pi_raw[r,s,4] <- (1-psi[r,s]) * p[r,s] * phi_S[s] + eps
+        pi_raw[r,s,5] <- (1-psi[r,s]) * (1-p[r,s]) * phi_S[s] + eps
     "
   }
 
   model_string <- paste0("model {
     eps <- 1.0E-9
 
-    # Rear-specific GE with centered, partially pooled rear effects.
+    # Rear-specific GE with additive spill and outflow effects.
     tau_psi <- pow(sigma_psi, -2)
     tau_strat <- pow(sigma_strat, -2)
     ", rear_block, "
@@ -328,8 +423,7 @@ fit_ge_rear_model2 <- function(
         logit_psi[r,s] ~ dnorm(
           mu_strat[parent[s]] + rear_psi[r] +
           beta * lgr_spill_std[s] +
-          beta_outflow * outflow_std[s] +
-          beta_interaction * interaction_std[s],
+          beta_outflow * outflow_std[s],
           tau_psi)
         psi[r,s] <- ilogit(logit_psi[r,s])
       }
@@ -338,12 +432,10 @@ fit_ge_rear_model2 <- function(
     alpha ~ dt(0, pow(2, -2), 7)
     beta ~ dt(0, pow(1, -2), 7) T(, 0)
     beta_outflow ~ dt(0, pow(1, -2), 7)
-    beta_interaction ~ dt(0, pow(1, -2), 7)
     sigma_psi ~ dnorm(0, pow(0.5, -2)) T(0,)
     sigma_strat ~ dunif(0.05, 3)
 
-    # Rear-specific spillway-array detection with shared seasonal structure
-    # and a shared spill slope.
+    # Rear-specific spillway-array detection with shared seasonal structure.
     tau_p <- pow(sigma_p, -2)
     tau_strat_p <- pow(sigma_strat_p, -2)
     for (r in 1:R) {
@@ -360,32 +452,13 @@ fit_ge_rear_model2 <- function(
     sigma_p ~ dunif(0.05, 3)
     sigma_strat_p ~ dunif(0.05, 3)
 
-    # Rear-specific downstream recovery and route offset with shared LGS-spill
-    # response and shared process variance.
-    tau_phi <- pow(sigma_phi, -2)
-    for (r in 1:R) {
-      for (s in 1:S) {
-        logit_phi_S[r,s] ~ dnorm(
-          alpha_phi + rear_phi[r] + beta_phi * lgs_spill_std[s], tau_phi)
-        phi_S[r,s] <- ilogit(logit_phi_S[r,s])
-        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])
-      }
-    }
-    alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
-    beta_phi ~ dnorm(beta_phi_mean, pow(beta_phi_sd, -2)) T(, 0)
-    sigma_phi ~ dunif(0.05, 3)
-    ", rear_delta_block, "
-    ", delta_block, "
+    ", phi_block, "
 
     # Transport and the six-cell likelihood are rear-specific.
     for (r in 1:R) {
       for (s in 1:S) {
         trans[r,s] ~ dbeta(1, 1)
-        pi_raw[r,s,1] <- psi[r,s] * (1-trans[r,s]) * (1-phi_B[r,s]) + eps
-        pi_raw[r,s,2] <- psi[r,s] * (1-trans[r,s]) * phi_B[r,s] + eps
-        pi_raw[r,s,3] <- (1-psi[r,s]) * p[r,s] * (1-phi_S[r,s]) + eps
-        pi_raw[r,s,4] <- (1-psi[r,s]) * p[r,s] * phi_S[r,s] + eps
-        pi_raw[r,s,5] <- (1-psi[r,s]) * (1-p[r,s]) * phi_S[r,s] + eps
+        ", observation_block, "
         pi_raw[r,s,6] <- psi[r,s] * trans[r,s] + eps
         p_seen[r,s] <- sum(pi_raw[r,s,1:6])
         for (cc in 1:6) { pi_obs[r,s,cc] <- pi_raw[r,s,cc] / p_seen[r,s] }
@@ -407,17 +480,20 @@ fit_ge_rear_model2 <- function(
   monitor <- c(
     "psi", "p", "phi_S", "phi_B",
     "trans", "pi_obs", "alpha", "beta", "sigma_psi", "mu_strat",
-    "beta_outflow", "beta_interaction",
+    "beta_outflow",
     "sigma_strat", "alpha_p", "beta_p", "sigma_p", "mu_strat_p",
     "sigma_strat_p", "alpha_phi", "beta_phi", "sigma_phi"
   )
   if (R > 1L) {
-    monitor <- c(monitor, "rear_psi", "rear_p", "rear_phi",
-                 "sigma_rear_psi", "sigma_rear_p", "sigma_rear_phi")
+    monitor <- c(monitor, "rear_psi", "rear_p",
+                 "sigma_rear_psi", "sigma_rear_p")
+    if (full_structure) {
+      monitor <- c(monitor, "rear_phi", "sigma_rear_phi")
+    }
   }
   if (delta_mode == "free") {
     monitor <- c(monitor, "delta", "delta0", "sigma_delta")
-    if (R > 1L) {
+    if (R > 1L && full_structure) {
       monitor <- c(monitor, "rear_delta", "sigma_rear_delta")
     }
   }
@@ -427,6 +503,7 @@ fit_ge_rear_model2 <- function(
             n_chains, " chains x ", n_iter,
             " post-burn iterations, thin ", n_thin, ".")
     message("Target rear: ", target_rear,
+            "; rear structure: ", rear_structure,
             "; phi-prior source: ", prior_source, ".")
   }
 
@@ -470,7 +547,7 @@ fit_ge_rear_model2 <- function(
   )
   bad <- !is.finite(summary$Rhat) | summary$Rhat > rhat_threshold
   core <- grepl(
-    "^psi\\[|^p\\[|^phi_[SB]\\[|^delta\\[|^rear_(psi|p|phi|delta)\\[|^(alpha|beta|beta_outflow|beta_interaction|sigma_psi|sigma_rear_psi|sigma_rear_p|sigma_rear_phi|sigma_rear_delta)$",
+    "^psi\\[|^p\\[|^phi_[SB]\\[|^delta\\[|^rear_(psi|p|phi|delta)\\[|^(alpha|beta|beta_outflow|sigma_psi|sigma_rear_psi|sigma_rear_p|sigma_rear_phi|sigma_rear_delta)$",
     summary$parameter)
   diagnostics <- list(
     method = "classical coda R-hat, autoburnin=FALSE; coda ESS",
@@ -532,19 +609,26 @@ fit_ge_rear_model2 <- function(
     lgr_spill_pct = lgr, lgr_spill_std = lgr_std,
     outflow_mean = outflow_mean, outflow_sd = outflow_sd,
     outflow = as.numeric(outflow), outflow_std = outflow_std,
-    interaction_std = interaction_std,
     lgs_spill_mean = lgs_mean, lgs_spill_sd = lgs_sd,
     strat_assign = data.frame(Week = weeks, Collapse = seq_len(S)),
     model_string = model_string, jags_data = jd,
     settings = list(
       model = "six-cell rear-type partial pooling",
+      rear_structure = rear_structure,
       delta_mode = delta_mode, delta_sd = delta_sd,
       rear_sd_scale = rear_sd_scale, phi_prior_source = prior_source,
-      psi_covariates = c("percent spill", "outflow", "spill x outflow"),
-      shared_processes = c("seasonal hierarchy", "covariate slopes",
-                           "process variance hyperparameters"),
-      rear_specific_processes = c("psi", "p", "phi_S", "phi_B",
-                                  if (delta_mode == "free") "delta", "trans"),
+      psi_covariates = c("percent spill", "outflow"),
+      shared_processes = c(
+        "seasonal hierarchy", "covariate slopes",
+        "process variance hyperparameters",
+        if (!full_structure) c("phi_S", "phi_B", "delta")
+      ),
+      rear_specific_processes = c(
+        "psi", "p",
+        if (full_structure) c("phi_S", "phi_B",
+                              if (delta_mode == "free") "delta"),
+        "trans"
+      ),
       n_iter = n_iter, n_adapt = n_adapt, n_burnin = n_burnin,
       n_chains = n_chains, n_thin = n_thin, seed = seed
     )

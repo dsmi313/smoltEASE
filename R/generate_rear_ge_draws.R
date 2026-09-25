@@ -3,8 +3,9 @@
 #' Extracts one rear group's weekly guidance-efficiency posterior from
 #' [fit_ge_rear_model2()] and returns coherent posterior columns for SCRAPI2.
 #' When daily covariates are supplied, each draw retains its fitted weekly
-#' residual while replacing weekly percent spill, outflow, and their interaction
-#' with the observed daily values.
+#' residual while replacing weekly percent spill and outflow with the observed
+#' daily values. Legacy fits containing an interaction coefficient remain
+#' readable, but new fits from [fit_ge_rear_model2()] are additive.
 #'
 #' @param ge_fit Result from [fit_ge_rear_model2()].
 #' @param rear_type Rear group to extract. Defaults to the fit's target rear.
@@ -91,8 +92,7 @@ generate_rear_ge_draws <- function(
          call. = FALSE)
   }
   needed <- c("samples", "rear_levels", "weeks", "spill_mean", "spill_sd",
-              "lgr_spill_std", "outflow_mean", "outflow_sd", "outflow_std",
-              "interaction_std")
+              "lgr_spill_std", "outflow_mean", "outflow_sd", "outflow_std")
   missing <- setdiff(needed, names(ge_fit))
   if (length(missing)) {
     stop("ge_fit is missing: ", paste(missing, collapse = ", "), ".",
@@ -132,7 +132,7 @@ generate_rear_ge_draws <- function(
 
   mat <- do.call(rbind, lapply(ge_fit$samples, as.matrix))
   psi_cols <- paste0("psi[", r, ",", seq_along(ge_fit$weeks), "]")
-  coef_cols <- c("beta", "beta_outflow", "beta_interaction")
+  coef_cols <- c("beta", "beta_outflow")
   if (!all(c(psi_cols, coef_cols) %in% colnames(mat))) {
     stop("The requested rear-specific psi or covariate draws are absent.",
          call. = FALSE)
@@ -155,7 +155,13 @@ generate_rear_ge_draws <- function(
   psi <- pmin(pmax(selected[, psi_cols, drop = FALSE], 1e-9), 1 - 1e-9)
   beta <- selected[, "beta"]
   beta_outflow <- selected[, "beta_outflow"]
-  beta_interaction <- selected[, "beta_interaction"]
+  legacy_interaction <- "beta_interaction" %in% colnames(selected) &&
+    "interaction_std" %in% names(ge_fit)
+  beta_interaction <- if (legacy_interaction) {
+    selected[, "beta_interaction"]
+  } else {
+    rep(0, nrow(selected))
+  }
 
   # Weighted season fallback is used only when strict_dates = FALSE.
   target_counts <- ge_fit$N_seen[r, ]
@@ -200,13 +206,18 @@ generate_rear_ge_draws <- function(
         spill_std <- (spill_x - ge_fit$spill_mean) / ge_fit$spill_sd
         flow_std <- (flow_x - ge_fit$outflow_mean) / ge_fit$outflow_sd
       }
-      interaction_std <- spill_std * flow_std
+      interaction_adjustment <- if (legacy_interaction) {
+        beta_interaction * (
+          spill_std * flow_std - ge_fit$interaction_std[ss]
+        )
+      } else {
+        0
+      }
       ge[d, ] <- stats::plogis(
         stats::qlogis(psi[, ss]) +
           beta * (spill_std - ge_fit$lgr_spill_std[ss]) +
           beta_outflow * (flow_std - ge_fit$outflow_std[ss]) +
-          beta_interaction *
-            (interaction_std - ge_fit$interaction_std[ss]))
+          interaction_adjustment)
     }
   }
   ge <- pmin(pmax(ge, 0), 1)
