@@ -71,13 +71,13 @@ ge_draws_W <- generate_rear_ge_draws(
   rear_type = "W",
   pass_dates = passageData$SampleEndDate,
   B = 5000,
-  daily_spill = lgr_daily_spill,
+  daily_spill = lgr_daily_covariates, # Date, spill.per, outflow
   clip_to_ci = FALSE,
   seed = 12
 )
 ```
 
-The model estimates rear-specific weekly GE and transport probabilities while sharing the seasonal hierarchy, spill response, spillway detection, downstream recovery, and route offset. The `U` level is an observed unknown-rear classification, not a latent hatchery/wild mixture. Treat this model as exploratory until posterior predictive checks and recovery simulations support its assumptions.
+The model estimates rear-specific weekly GE and transport probabilities while sharing the seasonal hierarchy, covariate responses, spillway detection, downstream recovery, and route offset. The GE regression includes standardized percent spill, standardized mean outflow, and their interaction. The `U` level is an observed unknown-rear classification, not a latent hatchery/wild mixture. Treat this model as exploratory until posterior predictive checks and recovery simulations support its assumptions.
 
 ## Relationship to other tools
 
