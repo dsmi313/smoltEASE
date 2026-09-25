@@ -46,6 +46,39 @@ The composed interval combines bootstrap resampling of the trap sample with draw
 
 Simulation testing used 20 seeds, each drawing its own hyperparameters from the real-data posterior. The multistate model recovered GE with mean absolute bias 0.017 and 0.979 coverage, with coverage of 0.968, 0.957, and 0.979 for the GRS detection and the two route-specific downstream probabilities. Against an independently fixed 300,000-smolt target, fitted-GE SCRAPI2 had a median absolute error of 3.3% and all 20 nominal 90% intervals contained the target. The known-GE arm also covered 20 of 20, so the observed over-coverage is present at the sampling-noise floor rather than introduced by estimating GE. Twenty seeds cannot distinguish correct calibration from over-coverage, and GE and abundance are estimated sequentially rather than in a single joint likelihood.
 
+## Rear-type partial pooling
+
+The experimental six-cell rear model tests whether known wild fish can borrow information from hatchery and unknown-rear PIT histories without forcing all rear groups to share one GE curve.
+
+```r
+rear_fit <- fit_ge_rear_model2(
+  ge_data = list(H = ge_H, W = ge_W, U = ge_U),
+  weeks = 13:26,
+  target_rear = "W",
+  delta_mode = "free",
+  delta_sd = 0.5,
+  rear_sd_scale = 1,
+  n_iter = 50000,
+  n_adapt = 5000,
+  n_burnin = 20000,
+  n_chains = 3,
+  n_thin = 10,
+  seed = 11
+)
+
+ge_draws_W <- generate_rear_ge_draws(
+  rear_fit,
+  rear_type = "W",
+  pass_dates = passageData$SampleEndDate,
+  B = 5000,
+  daily_spill = lgr_daily_spill,
+  clip_to_ci = FALSE,
+  seed = 12
+)
+```
+
+The model estimates rear-specific weekly GE and transport probabilities while sharing the seasonal hierarchy, spill response, spillway detection, downstream recovery, and route offset. The `U` level is an observed unknown-rear classification, not a latent hatchery/wild mixture. Treat this model as exploratory until posterior predictive checks and recovery simulations support its assumptions.
+
 ## Relationship to other tools
 
 - `SCOBI::SCRAPI`: the legacy estimator. `smoltEASE` reads the same inputs and reduces to comparable results when GE and GSI uncertainty are switched off.
