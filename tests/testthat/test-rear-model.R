@@ -88,3 +88,18 @@ test_that("daily projection carries the spill-by-outflow interaction", {
     seed = 1)
   expect_equal(as.numeric(out[1, -1]), rep(plogis(qlogis(.2) + 1), 4))
 })
+
+
+test_that("hierarchical fit makes observation processes rear-specific", {
+  fn <- paste(deparse(body(fit_ge_rear_model2)), collapse = "\n")
+  expect_match(fn, "p\\[r,s\\]", fixed = FALSE)
+  expect_match(fn, "phi_S\\[r,s\\]", fixed = FALSE)
+  expect_match(fn, "phi_B\\[r,s\\]", fixed = FALSE)
+  expect_match(fn, "delta\\[r,s\\]", fixed = FALSE)
+  expect_match(fn, "rear_p\\[r\\]", fixed = FALSE)
+  expect_match(fn, "rear_phi\\[r\\]", fixed = FALSE)
+  expect_match(fn, "rear_delta\\[r\\]", fixed = FALSE)
+  expect_false(grepl("p\\[s\\]", fn))
+  expect_false(grepl("phi_S\\[s\\]", fn))
+  expect_false(grepl("phi_B\\[s\\]", fn))
+})

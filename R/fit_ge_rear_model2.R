@@ -1,12 +1,12 @@
 #' Fit a rear-type hierarchical six-cell GE model
 #'
 #' Fits the six-cell guidance-efficiency model jointly to two or more rear-type
-#' groups. Weekly guidance efficiency (psi) and transport probability are
-#' rear-specific. The GE regression contains standardized percent spill,
-#' standardized outflow, and their interaction. The seasonal hierarchy,
-#' spillway detection,
-#' downstream recovery, and route offset are shared across rear groups. Rear
-#' effects on logit(psi) are centered and partially pooled.
+#' groups. Weekly guidance efficiency (psi), spillway-array detection (p),
+#' downstream recovery (phi_S and phi_B), route offset, and transport
+#' probability are rear-specific. Each rear effect is centered and partially
+#' pooled, while seasonal structure and covariate slopes are shared. The GE
+#' regression contains standardized percent spill, standardized outflow, and
+#' their interaction.
 #'
 #' @param ge_data Named list of six-cell data lists returned by
 #'   [prep_ge_data2()], one per rear group. For example, `list(H = ge_H,
@@ -23,8 +23,8 @@
 #'   vector from `ge_data[[target_rear]]` is used.
 #' @param delta_mode Estimate (`"free"`) or fix (`"fixed"`) the route offset.
 #' @param delta_sd Prior SD for the mean route offset when estimated.
-#' @param rear_sd_scale Half-normal prior scale for the among-rear SD on the
-#'   logit-GE scale. Default 1.
+#' @param rear_sd_scale Half-normal prior scale for the among-rear SDs on the
+#'   logit scales for psi, p, phi_S, and the route offset. Default 1.
 #' @param phi_prior Optional list containing `alpha_phi_mean`, `alpha_phi_sd`,
 #'   `beta_phi_mean`, and `beta_phi_sd`. Otherwise these are read from the
 #'   target-rear data or use the provisional six-cell defaults.
@@ -36,8 +36,9 @@
 #'
 #' @details This is an exploratory partial-pooling model. It treats `U` as an
 #' observed unknown-rear classification, not as a distinct biological
-#' population or a latent H/W mixture. The shared nuisance-process assumptions
-#' should be checked with posterior predictive diagnostics and recovery tests.
+#' population or a latent H/W mixture. Rear-specific nuisance processes add
+#' parameters and should be checked with posterior predictive diagnostics,
+#' convergence diagnostics, and recovery tests.
 #'
 #' @return A list containing posterior `samples`, weekly `psi_summary`, full
 #' parameter `summary`, convergence `diagnostics`, model inputs and scaling,
@@ -261,22 +262,58 @@ fit_ge_rear_model2 <- function(
     delta0 ~ dnorm(0, pow(delta_sd, -2))
     sigma_delta ~ dunif(0, 3)
     tau_delta <- pow(sigma_delta + 1.0E-6, -2)
-    for (s in 1:S) { delta[s] ~ dnorm(delta0, tau_delta) }
+    for (r in 1:R) {
+      for (s in 1:S) {
+        delta[r,s] ~ dnorm(delta0 + rear_delta[r], tau_delta)
+      }
+    }
     "
   } else {
-    "for (s in 1:S) { delta[s] <- 0 }"
+    "for (r in 1:R) { for (s in 1:S) { delta[r,s] <- 0 } }"
+  }
+
+  rear_delta_block <- if (R > 1L && delta_mode == "free") {
+    "
+    tau_rear_delta <- pow(sigma_rear_delta + 1.0E-6, -2)
+    for (r in 1:R) { rear_delta_raw[r] ~ dnorm(0, tau_rear_delta) }
+    rear_delta_mean <- mean(rear_delta_raw[])
+    for (r in 1:R) {
+      rear_delta[r] <- rear_delta_raw[r] - rear_delta_mean
+    }
+    sigma_rear_delta ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+    "
+  } else {
+    "for (r in 1:R) { rear_delta[r] <- 0 }"
   }
 
   rear_block <- if (R > 1L) {
     "
-    tau_rear <- pow(sigma_rear_psi + 1.0E-6, -2)
-    for (r in 1:R) { rear_psi_raw[r] ~ dnorm(0, tau_rear) }
-    rear_mean <- mean(rear_psi_raw[])
-    for (r in 1:R) { rear_psi[r] <- rear_psi_raw[r] - rear_mean }
+    tau_rear_psi <- pow(sigma_rear_psi + 1.0E-6, -2)
+    tau_rear_p <- pow(sigma_rear_p + 1.0E-6, -2)
+    tau_rear_phi <- pow(sigma_rear_phi + 1.0E-6, -2)
+    for (r in 1:R) {
+      rear_psi_raw[r] ~ dnorm(0, tau_rear_psi)
+      rear_p_raw[r] ~ dnorm(0, tau_rear_p)
+      rear_phi_raw[r] ~ dnorm(0, tau_rear_phi)
+    }
+    rear_psi_mean <- mean(rear_psi_raw[])
+    rear_p_mean <- mean(rear_p_raw[])
+    rear_phi_mean <- mean(rear_phi_raw[])
+    for (r in 1:R) {
+      rear_psi[r] <- rear_psi_raw[r] - rear_psi_mean
+      rear_p[r] <- rear_p_raw[r] - rear_p_mean
+      rear_phi[r] <- rear_phi_raw[r] - rear_phi_mean
+    }
     sigma_rear_psi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+    sigma_rear_p ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+    sigma_rear_phi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
     "
   } else {
-    "rear_psi[1] <- 0"
+    "
+    rear_psi[1] <- 0
+    rear_p[1] <- 0
+    rear_phi[1] <- 0
+    "
   }
 
   model_string <- paste0("model {
@@ -305,12 +342,17 @@ fit_ge_rear_model2 <- function(
     sigma_psi ~ dnorm(0, pow(0.5, -2)) T(0,)
     sigma_strat ~ dunif(0.05, 3)
 
-    # Shared spillway-array detection.
+    # Rear-specific spillway-array detection with shared seasonal structure
+    # and a shared spill slope.
     tau_p <- pow(sigma_p, -2)
     tau_strat_p <- pow(sigma_strat_p, -2)
-    for (s in 1:S) {
-      logit_p[s] ~ dnorm(mu_strat_p[parent[s]] + beta_p * lgr_spill_std[s], tau_p)
-      p[s] <- ilogit(logit_p[s])
+    for (r in 1:R) {
+      for (s in 1:S) {
+        logit_p[r,s] ~ dnorm(
+          mu_strat_p[parent[s]] + rear_p[r] +
+          beta_p * lgr_spill_std[s], tau_p)
+        p[r,s] <- ilogit(logit_p[r,s])
+      }
     }
     for (g in 1:n_strat) { mu_strat_p[g] ~ dnorm(alpha_p, tau_strat_p) }
     alpha_p ~ dt(0, pow(2, -2), 7)
@@ -318,27 +360,32 @@ fit_ge_rear_model2 <- function(
     sigma_p ~ dunif(0.05, 3)
     sigma_strat_p ~ dunif(0.05, 3)
 
-    # Shared downstream recovery and route offset.
+    # Rear-specific downstream recovery and route offset with shared LGS-spill
+    # response and shared process variance.
     tau_phi <- pow(sigma_phi, -2)
-    for (s in 1:S) {
-      logit_phi_S[s] ~ dnorm(alpha_phi + beta_phi * lgs_spill_std[s], tau_phi)
-      phi_S[s] <- ilogit(logit_phi_S[s])
-      phi_B[s] <- ilogit(logit_phi_S[s] - delta[s])
+    for (r in 1:R) {
+      for (s in 1:S) {
+        logit_phi_S[r,s] ~ dnorm(
+          alpha_phi + rear_phi[r] + beta_phi * lgs_spill_std[s], tau_phi)
+        phi_S[r,s] <- ilogit(logit_phi_S[r,s])
+        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])
+      }
     }
     alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
     beta_phi ~ dnorm(beta_phi_mean, pow(beta_phi_sd, -2)) T(, 0)
     sigma_phi ~ dunif(0.05, 3)
+    ", rear_delta_block, "
     ", delta_block, "
 
     # Transport and the six-cell likelihood are rear-specific.
     for (r in 1:R) {
       for (s in 1:S) {
         trans[r,s] ~ dbeta(1, 1)
-        pi_raw[r,s,1] <- psi[r,s] * (1-trans[r,s]) * (1-phi_B[s]) + eps
-        pi_raw[r,s,2] <- psi[r,s] * (1-trans[r,s]) * phi_B[s] + eps
-        pi_raw[r,s,3] <- (1-psi[r,s]) * p[s] * (1-phi_S[s]) + eps
-        pi_raw[r,s,4] <- (1-psi[r,s]) * p[s] * phi_S[s] + eps
-        pi_raw[r,s,5] <- (1-psi[r,s]) * (1-p[s]) * phi_S[s] + eps
+        pi_raw[r,s,1] <- psi[r,s] * (1-trans[r,s]) * (1-phi_B[r,s]) + eps
+        pi_raw[r,s,2] <- psi[r,s] * (1-trans[r,s]) * phi_B[r,s] + eps
+        pi_raw[r,s,3] <- (1-psi[r,s]) * p[r,s] * (1-phi_S[r,s]) + eps
+        pi_raw[r,s,4] <- (1-psi[r,s]) * p[r,s] * phi_S[r,s] + eps
+        pi_raw[r,s,5] <- (1-psi[r,s]) * (1-p[r,s]) * phi_S[r,s] + eps
         pi_raw[r,s,6] <- psi[r,s] * trans[r,s] + eps
         p_seen[r,s] <- sum(pi_raw[r,s,1:6])
         for (cc in 1:6) { pi_obs[r,s,cc] <- pi_raw[r,s,cc] / p_seen[r,s] }
@@ -364,9 +411,15 @@ fit_ge_rear_model2 <- function(
     "sigma_strat", "alpha_p", "beta_p", "sigma_p", "mu_strat_p",
     "sigma_strat_p", "alpha_phi", "beta_phi", "sigma_phi"
   )
-  if (R > 1L) monitor <- c(monitor, "rear_psi", "sigma_rear_psi")
+  if (R > 1L) {
+    monitor <- c(monitor, "rear_psi", "rear_p", "rear_phi",
+                 "sigma_rear_psi", "sigma_rear_p", "sigma_rear_phi")
+  }
   if (delta_mode == "free") {
     monitor <- c(monitor, "delta", "delta0", "sigma_delta")
+    if (R > 1L) {
+      monitor <- c(monitor, "rear_delta", "sigma_rear_delta")
+    }
   }
   if (verbose) {
     message("Rear-type six-cell fit: ", R, " rear groups x ", S,
@@ -417,7 +470,7 @@ fit_ge_rear_model2 <- function(
   )
   bad <- !is.finite(summary$Rhat) | summary$Rhat > rhat_threshold
   core <- grepl(
-    "^psi\\[|^rear_psi\\[|^(alpha|beta|beta_outflow|beta_interaction|sigma_psi|sigma_rear_psi)$",
+    "^psi\\[|^p\\[|^phi_[SB]\\[|^delta\\[|^rear_(psi|p|phi|delta)\\[|^(alpha|beta|beta_outflow|beta_interaction|sigma_psi|sigma_rear_psi|sigma_rear_p|sigma_rear_phi|sigma_rear_delta)$",
     summary$parameter)
   diagnostics <- list(
     method = "classical coda R-hat, autoburnin=FALSE; coda ESS",
@@ -450,13 +503,29 @@ fit_ge_rear_model2 <- function(
 
   rear_summary <- summary[grepl("^rear_psi\\[", summary$parameter), , drop = FALSE]
   if (R > 1L) {
-    rear_summary$rear <- rear_levels
+    rear_index <- as.integer(sub(".*\\[([0-9]+)\\]$", "\\1",
+                                 rear_summary$parameter))
+    rear_summary$rear <- rear_levels[rear_index]
     rear_summary <- rear_summary[, c("rear", setdiff(names(rear_summary), "rear"))]
+  }
+
+  nuisance_rear_summary <- summary[
+    grepl("^rear_(p|phi|delta)\\[", summary$parameter), , drop = FALSE]
+  if (nrow(nuisance_rear_summary)) {
+    nuisance_index <- as.integer(sub(".*\\[([0-9]+)\\]$", "\\1",
+                                     nuisance_rear_summary$parameter))
+    nuisance_rear_summary$rear <- rear_levels[nuisance_index]
+    nuisance_rear_summary$process <- sub(
+      "^rear_([^\\[]+)\\[.*$", "\\1", nuisance_rear_summary$parameter)
+    nuisance_rear_summary <- nuisance_rear_summary[
+      , c("process", "rear",
+          setdiff(names(nuisance_rear_summary), c("process", "rear")))]
   }
 
   result <- list(
     samples = samples, summary = summary, diagnostics = diagnostics,
     psi_summary = psi_summary, rear_summary = rear_summary,
+    nuisance_rear_summary = nuisance_rear_summary,
     rear_levels = rear_levels, target_rear = target_rear,
     weeks = weeks, parent = parent, n = n, N_seen = N_seen,
     spill_mean = lgr_mean, spill_sd = lgr_sd,
@@ -472,9 +541,10 @@ fit_ge_rear_model2 <- function(
       delta_mode = delta_mode, delta_sd = delta_sd,
       rear_sd_scale = rear_sd_scale, phi_prior_source = prior_source,
       psi_covariates = c("percent spill", "outflow", "spill x outflow"),
-      shared_processes = c("seasonal pattern", "covariate slopes", "p",
-                           "phi_S", "phi_B", "delta"),
-      rear_specific_processes = c("psi", "trans"),
+      shared_processes = c("seasonal hierarchy", "covariate slopes",
+                           "process variance hyperparameters"),
+      rear_specific_processes = c("psi", "p", "phi_S", "phi_B",
+                                  if (delta_mode == "free") "delta", "trans"),
       n_iter = n_iter, n_adapt = n_adapt, n_burnin = n_burnin,
       n_chains = n_chains, n_thin = n_thin, seed = seed
     )
