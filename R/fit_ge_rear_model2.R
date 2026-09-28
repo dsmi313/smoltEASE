@@ -6,7 +6,7 @@
 #' `rear_structure = "full"`, downstream recovery (phi_S and phi_B) and the
 #' route offset are also rear-specific. With `rear_structure = "reduced"`,
 #' downstream recovery and the route offset are shared. Seasonal structure and
-#' covariate slopes are shared. The GE regression is additive in standardized
+#' GE covariate slopes are shared. The GE regression is additive in standardized
 #' percent spill and standardized outflow.
 #'
 #' @param ge_data Named list of six-cell data lists returned by
@@ -26,6 +26,15 @@
 #'   `phi_S`, `phi_B`, `delta`, and `trans`. `"reduced"` estimates
 #'   rear-specific `psi`, `p`, and `trans`, while sharing `phi_S`,
 #'   `phi_B`, and `delta`.
+#' @param phi_structure With `rear_structure = "full"`, `"shared"` retains
+#'   the common LGS spill slope and weekly recovery SD. `"rear_flexible"`
+#'   partially pools rear-specific LGS slopes around a common slope and
+#'   estimates a separate weekly recovery SD for each rear. The recovery
+#'   intercept remains partially pooled. Default `"shared"` preserves the
+#'   existing model.
+#' @param phi_slope_sd_scale Half-normal prior scale for the between-rear SD
+#'   of LGS spill slopes when `phi_structure = "rear_flexible"`. Default 0.5
+#'   on the logit scale per standardized LGS percent spill.
 #' @param delta_mode Estimate (`"free"`) or fix (`"fixed"`) the route offset.
 #' @param delta_sd Prior SD for the mean route offset when estimated.
 #' @param rear_sd_scale Half-normal prior scale for the among-rear SDs on the
@@ -69,9 +78,11 @@ fit_ge_rear_model2 <- function(
     target_rear = "W",
     parent = NULL,
     rear_structure = c("full", "reduced"),
+    phi_structure = c("shared", "rear_flexible"),
     delta_mode = c("free", "fixed"),
     delta_sd = 0.5,
     rear_sd_scale = 1,
+    phi_slope_sd_scale = 0.5,
     phi_prior = NULL,
     n_iter = 30000,
     n_adapt = 2000,
@@ -83,7 +94,12 @@ fit_ge_rear_model2 <- function(
     verbose = TRUE) {
 
   rear_structure <- match.arg(rear_structure)
+  phi_structure <- match.arg(phi_structure)
   delta_mode <- match.arg(delta_mode)
+  if (phi_structure == "rear_flexible" && rear_structure != "full") {
+    stop("phi_structure = 'rear_flexible' requires rear_structure = 'full'.",
+         call. = FALSE)
+  }
   whole <- function(x, name, minimum = 0L) {
     if (!is.numeric(x) || length(x) != 1L || !is.finite(x) ||
         x < minimum || x != floor(x) || x > .Machine$integer.max) {
@@ -106,6 +122,7 @@ fit_ge_rear_model2 <- function(
   seed <- whole(seed, "seed")
   delta_sd <- positive(delta_sd, "delta_sd")
   rear_sd_scale <- positive(rear_sd_scale, "rear_sd_scale")
+  phi_slope_sd_scale <- positive(phi_slope_sd_scale, "phi_slope_sd_scale")
   rhat_threshold <- positive(rhat_threshold, "rhat_threshold")
   if (rhat_threshold <= 1) {
     stop("rhat_threshold must exceed 1.", call. = FALSE)
@@ -124,6 +141,10 @@ fit_ge_rear_model2 <- function(
          call. = FALSE)
   }
   rear_levels <- names(ge_data)
+  if (phi_structure == "rear_flexible" && length(rear_levels) < 2L) {
+    stop("phi_structure = 'rear_flexible' requires at least two rear groups.",
+         call. = FALSE)
+  }
   if (!is.character(target_rear) || length(target_rear) != 1L ||
       !target_rear %in% rear_levels) {
     stop("target_rear must name one element of ge_data.", call. = FALSE)
@@ -262,6 +283,8 @@ fit_ge_rear_model2 <- function(
   if (R > 1L) jd$rear_sd_scale <- rear_sd_scale
 
   full_structure <- rear_structure == "full"
+  flexible_phi <- full_structure && phi_structure == "rear_flexible"
+  if (flexible_phi) jd$phi_slope_sd_scale <- phi_slope_sd_scale
 
   delta_block <- if (delta_mode == "free" && full_structure) {
     jd$delta_sd <- delta_sd
@@ -358,7 +381,36 @@ fit_ge_rear_model2 <- function(
     "
   }
 
-  phi_block <- if (full_structure) {
+  phi_block <- if (flexible_phi) {
+    paste0("
+    # Rear-specific recovery with partial pooling of LGS spill slopes.
+    # Weekly recovery variation is estimated separately for each rear.
+    tau_beta_phi_rear <- pow(sigma_beta_phi_rear + 1.0E-6, -2)
+    for (r in 1:R) {
+      beta_phi_rear_raw[r] ~ dnorm(0, tau_beta_phi_rear)
+      sigma_phi_rear[r] ~ dunif(0.05, 3)
+    }
+    beta_phi_rear_mean <- mean(beta_phi_rear_raw[])
+    for (r in 1:R) {
+      beta_phi_rear[r] <- beta_phi +
+        beta_phi_rear_raw[r] - beta_phi_rear_mean
+      tau_phi_rear[r] <- pow(sigma_phi_rear[r], -2)
+      for (s in 1:S) {
+        logit_phi_S[r,s] ~ dnorm(
+          alpha_phi + rear_phi[r] +
+          beta_phi_rear[r] * lgs_spill_std[s], tau_phi_rear[r])
+        phi_S[r,s] <- ilogit(logit_phi_S[r,s])
+        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])
+      }
+    }
+    alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
+    beta_phi ~ dnorm(beta_phi_mean, pow(beta_phi_sd, -2)) T(, 0)
+    sigma_beta_phi_rear ~
+      dnorm(0, pow(phi_slope_sd_scale, -2)) T(0,)
+    ", rear_delta_block, "
+    ", delta_block, "
+    ")
+  } else if (full_structure) {
     paste0("
     # Rear-specific downstream recovery and route offset.
     tau_phi <- pow(sigma_phi, -2)
@@ -482,7 +534,9 @@ fit_ge_rear_model2 <- function(
     "trans", "pi_obs", "alpha", "beta", "sigma_psi", "mu_strat",
     "beta_outflow",
     "sigma_strat", "alpha_p", "beta_p", "sigma_p", "mu_strat_p",
-    "sigma_strat_p", "alpha_phi", "beta_phi", "sigma_phi"
+    "sigma_strat_p", "alpha_phi", "beta_phi",
+    if (flexible_phi) c("beta_phi_rear", "sigma_beta_phi_rear",
+                        "sigma_phi_rear") else "sigma_phi"
   )
   if (R > 1L) {
     monitor <- c(monitor, "rear_psi", "rear_p",
@@ -504,6 +558,7 @@ fit_ge_rear_model2 <- function(
             " post-burn iterations, thin ", n_thin, ".")
     message("Target rear: ", target_rear,
             "; rear structure: ", rear_structure,
+            "; phi structure: ", phi_structure,
             "; phi-prior source: ", prior_source, ".")
   }
 
@@ -615,6 +670,8 @@ fit_ge_rear_model2 <- function(
     settings = list(
       model = "six-cell rear-type partial pooling",
       rear_structure = rear_structure,
+      phi_structure = phi_structure,
+      phi_slope_sd_scale = phi_slope_sd_scale,
       delta_mode = delta_mode, delta_sd = delta_sd,
       rear_sd_scale = rear_sd_scale, phi_prior_source = prior_source,
       psi_covariates = c("percent spill", "outflow"),
