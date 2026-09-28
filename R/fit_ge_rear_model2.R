@@ -35,6 +35,11 @@
 #' @param phi_slope_sd_scale Half-normal prior scale for the between-rear SD
 #'   of LGS spill slopes when `phi_structure = "rear_flexible"`. Default 0.5
 #'   on the logit scale per standardized LGS percent spill.
+#' @param trans_on Optional R by S 0/1 matrix of known transport availability,
+#'   with rows in `ge_data` rear order and columns in `weeks` order. Zero
+#'   fixes transport at zero in that rear-week. If `NULL`, transport is
+#'   estimated in every rear-week as in the original model. Do not set zero
+#'   merely because no transported fish were observed.
 #' @param delta_mode Estimate (`"free"`) or fix (`"fixed"`) the route offset.
 #' @param delta_sd Prior SD for the mean route offset when estimated.
 #' @param rear_sd_scale Half-normal prior scale for the among-rear SDs on the
@@ -83,6 +88,7 @@ fit_ge_rear_model2 <- function(
     delta_sd = 0.5,
     rear_sd_scale = 1,
     phi_slope_sd_scale = 0.5,
+    trans_on = NULL,
     phi_prior = NULL,
     n_iter = 30000,
     n_adapt = 2000,
@@ -206,6 +212,27 @@ fit_ge_rear_model2 <- function(
     }
     n[r, , ] <- nr
   }
+  if (!is.null(trans_on)) {
+    if (!is.matrix(trans_on) || !identical(dim(trans_on), c(R, S)) ||
+        anyNA(trans_on) || !all(trans_on %in% 0:1)) {
+      stop("trans_on must be an R x S matrix of 0/1, ordered by rear and week.",
+           call. = FALSE)
+    }
+    if (!is.null(rownames(trans_on)) &&
+        !identical(rownames(trans_on), rear_levels)) {
+      stop("trans_on row names must match the ge_data rear order.", call. = FALSE)
+    }
+    if (!is.null(colnames(trans_on)) &&
+        !identical(colnames(trans_on), as.character(weeks))) {
+      stop("trans_on column names must match the ISO weeks.", call. = FALSE)
+    }
+    trans_on <- matrix(as.integer(trans_on), R, S,
+                       dimnames = list(rear_levels, as.character(weeks)))
+    if (any(n[, , 6L] > 0L & trans_on == 0L)) {
+      stop("Transported (c6) fish occur in a rear-week marked transport-off.",
+           call. = FALSE)
+    }
+  }
   storage.mode(n) <- "integer"
   N_seen <- apply(n, c(1L, 2L), sum)
   if (!any(N_seen > 0)) stop("No six-cell histories were supplied.", call. = FALSE)
@@ -281,6 +308,7 @@ fit_ge_rear_model2 <- function(
     outflow_std = outflow_std, lgs_spill_std = lgs_std
   ), phi_prior)
   if (R > 1L) jd$rear_sd_scale <- rear_sd_scale
+  if (!is.null(trans_on)) jd$trans_on <- unname(trans_on)
 
   full_structure <- rear_structure == "full"
   flexible_phi <- full_structure && phi_structure == "rear_flexible"
@@ -463,6 +491,13 @@ fit_ge_rear_model2 <- function(
     "
   }
 
+  transport_block <- if (is.null(trans_on)) {
+    "trans[r,s] ~ dbeta(1, 1)"
+  } else {
+    "trans_free[r,s] ~ dbeta(1, 1)
+     trans[r,s] <- trans_on[r,s] * trans_free[r,s]"
+  }
+
   model_string <- paste0("model {
     eps <- 1.0E-9
 
@@ -509,7 +544,7 @@ fit_ge_rear_model2 <- function(
     # Transport and the six-cell likelihood are rear-specific.
     for (r in 1:R) {
       for (s in 1:S) {
-        trans[r,s] ~ dbeta(1, 1)
+        ", transport_block, "
         ", observation_block, "
         pi_raw[r,s,6] <- psi[r,s] * trans[r,s] + eps
         p_seen[r,s] <- sum(pi_raw[r,s,1:6])
@@ -666,12 +701,13 @@ fit_ge_rear_model2 <- function(
     outflow = as.numeric(outflow), outflow_std = outflow_std,
     lgs_spill_mean = lgs_mean, lgs_spill_sd = lgs_sd,
     strat_assign = data.frame(Week = weeks, Collapse = seq_len(S)),
-    model_string = model_string, jags_data = jd,
+    model_string = model_string, jags_data = jd, trans_on = trans_on,
     settings = list(
       model = "six-cell rear-type partial pooling",
       rear_structure = rear_structure,
       phi_structure = phi_structure,
       phi_slope_sd_scale = phi_slope_sd_scale,
+      scheduled_transport = !is.null(trans_on),
       delta_mode = delta_mode, delta_sd = delta_sd,
       rear_sd_scale = rear_sd_scale, phi_prior_source = prior_source,
       psi_covariates = c("percent spill", "outflow"),
