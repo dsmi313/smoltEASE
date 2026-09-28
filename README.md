@@ -77,7 +77,40 @@ ge_draws_W <- generate_rear_ge_draws(
 )
 ```
 
-The model estimates rear-specific weekly GE and transport probabilities while sharing the seasonal hierarchy, covariate responses, spillway detection, downstream recovery, and route offset. The GE regression includes standardized percent spill, standardized mean outflow, and their interaction. The `U` level is an observed unknown-rear classification, not a latent hatchery/wild mixture. Treat this model as exploratory until posterior predictive checks and recovery simulations support its assumptions.
+The full model estimates separate weekly GE, spillway detection, downstream
+recovery, and transport for each rear type. Its recovery intercepts are
+partially pooled, while the default `phi_structure = "shared"` uses one LGS
+spill slope and one weekly recovery SD for all rear types. To test whether
+that sharing pulls sparse wild `phi_S` estimates toward hatchery fish, fit
+the same data with:
+
+```r
+phi_flexible <- fit_ge_rear_model2(
+  ge_data = list(H = ge_H, W = ge_W),
+  weeks = 13:26,
+  target_rear = "W",
+  rear_structure = "full",
+  phi_structure = "rear_flexible",
+  phi_slope_sd_scale = 0.5,
+  delta_mode = "free",
+  delta_sd = 0.5,
+  n_iter = 50000,
+  n_adapt = 5000,
+  n_burnin = 20000,
+  n_chains = 3,
+  n_thin = 10,
+  seed = 11
+)
+```
+
+This option retains a shared LGS slope as an anchor but lets each rear type
+depart from it; it estimates separate weekly recovery SDs. It leaves the GE,
+spillway detection, and transport structures unchanged. Compare wild
+`phi_S` coverage and posterior predictive counts, convergence, weekly GE,
+and expanded passage against the default using the same simulation seeds.
+It may widen intervals without moving the wild estimate toward truth. The
+`U` level is an observed unknown-rear classification, not a latent
+hatchery/wild mixture.
 
 ## Relationship to other tools
 

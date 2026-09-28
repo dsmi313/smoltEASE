@@ -102,6 +102,42 @@ test_that("hierarchical fit supports full and reduced rear structures", {
   expect_false(grepl("beta_interaction ~", fn, fixed = TRUE))
 })
 
+test_that("rear-flexible recovery fits and retains rear-specific slopes", {
+  skip_if_not_installed("rjags")
+  skip_if_not_installed("coda")
+  n_H <- rbind(
+    c(22, 3, 30, 2, 1, 0), c(18, 3, 28, 2, 1, 8),
+    c(12, 2, 22, 2, 1, 12), c(15, 2, 25, 2, 1, 0))
+  n_W <- rbind(
+    c(8, 1, 18, 1, 1, 0), c(7, 1, 16, 1, 1, 4),
+    c(5, 1, 13, 1, 1, 6), c(6, 1, 15, 1, 1, 0))
+  make_group <- function(n) {
+    list(n = n, lgr_spill_pct = c(25, 45, 65, 35),
+         lgs_spill_pct = c(20, 40, 60, 30),
+         lgr_outflow = c(70, 85, 100, 80),
+         parent = 1:4)
+  }
+  ge_data <- list(H = make_group(n_H), W = make_group(n_W))
+  expect_error(
+    fit_ge_rear_model2(ge_data, weeks = 13:16,
+                       rear_structure = "reduced",
+                       phi_structure = "rear_flexible"),
+    "requires rear_structure"
+  )
+  fit <- suppressWarnings(fit_ge_rear_model2(
+    ge_data, weeks = 13:16, rear_structure = "full",
+    phi_structure = "rear_flexible", delta_mode = "fixed",
+    n_adapt = 100, n_burnin = 100, n_iter = 200,
+    n_chains = 2, n_thin = 2, verbose = FALSE
+  ))
+  expect_s3_class(fit, "ge_rear_model2")
+  expect_equal(fit$settings$phi_structure, "rear_flexible")
+  expect_true(all(c("beta_phi_rear[1]", "beta_phi_rear[2]",
+                    "sigma_phi_rear[1]", "sigma_phi_rear[2]") %in%
+                  fit$summary$parameter))
+  expect_true(all(is.finite(fit$psi_summary$mean)))
+})
+
 test_that("new additive fits need no interaction column", {
   skip_if_not_installed("coda")
   m <- cbind(`psi[1,1]` = rep(.2, 4), beta = rep(-.5, 4),
