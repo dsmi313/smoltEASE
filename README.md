@@ -92,6 +92,7 @@ phi_flexible <- fit_ge_rear_model2(
   rear_structure = "full",
   phi_structure = "rear_flexible",
   phi_slope_sd_scale = 0.5,
+  trans_on = transport_schedule, # H/W x week 0/1 matrix from operations records
   delta_mode = "free",
   delta_sd = 0.5,
   n_iter = 50000,
@@ -109,6 +110,11 @@ spillway detection, and transport structures unchanged. Compare wild
 `phi_S` coverage and posterior predictive counts, convergence, weekly GE,
 and expanded passage against the default using the same simulation seeds.
 It may widen intervals without moving the wild estimate toward truth. The
+`trans_on` input fixes known transport-off rear-weeks at zero while retaining
+the original unconstrained transport fit when omitted. Set it from the
+collection schedule or from a simulation's specified truth, not from a zero
+observed c6 count. Its row order must match `ge_data`, and its column order
+must match `weeks`. The
 `U` level is an observed unknown-rear classification, not a latent
 hatchery/wild mixture.
 

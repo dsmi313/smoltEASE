@@ -118,15 +118,25 @@ test_that("rear-flexible recovery fits and retains rear-specific slopes", {
          parent = 1:4)
   }
   ge_data <- list(H = make_group(n_H), W = make_group(n_W))
+  trans_on <- matrix(c(0, 1, 1, 0, 0, 1, 1, 0),
+                     nrow = 2, byrow = TRUE,
+                     dimnames = list(c("H", "W"), as.character(13:16)))
   expect_error(
     fit_ge_rear_model2(ge_data, weeks = 13:16,
                        rear_structure = "reduced",
                        phi_structure = "rear_flexible"),
     "requires rear_structure"
   )
+  bad_schedule <- trans_on
+  bad_schedule["H", "14"] <- 0
+  expect_error(
+    fit_ge_rear_model2(ge_data, weeks = 13:16, trans_on = bad_schedule),
+    "Transported \\(c6\\)"
+  )
   fit <- suppressWarnings(fit_ge_rear_model2(
     ge_data, weeks = 13:16, rear_structure = "full",
     phi_structure = "rear_flexible", delta_mode = "fixed",
+    trans_on = trans_on,
     n_adapt = 100, n_burnin = 100, n_iter = 200,
     n_chains = 2, n_thin = 2, verbose = FALSE
   ))
@@ -136,6 +146,11 @@ test_that("rear-flexible recovery fits and retains rear-specific slopes", {
                     "sigma_phi_rear[1]", "sigma_phi_rear[2]") %in%
                   fit$summary$parameter))
   expect_true(all(is.finite(fit$psi_summary$mean)))
+  expect_equal(fit$settings$scheduled_transport, TRUE)
+  off_nodes <- c("trans[1,1]", "trans[1,4]", "trans[2,1]", "trans[2,4]")
+  expect_true(all(off_nodes %in% fit$summary$parameter))
+  expect_true(all(fit$summary$mean[
+    fit$summary$parameter %in% off_nodes] == 0))
 })
 
 test_that("new additive fits need no interaction column", {
