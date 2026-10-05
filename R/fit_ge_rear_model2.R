@@ -18,6 +18,13 @@
 #'   modeled week and in the same row order as `ge_data`. When `NULL`, use
 #'   `ge_data[[target_rear]]$lgr_outflow`. Values are standardized internally.
 #'   Use a rate (for example, mean hourly flow), not a sum of rates.
+#' @param psi_spill,psi_outflow Optional R x S matrices of weekly LGR percent
+#'   spill and mean outflow used only in the GE (psi) regression, with rows in
+#'   `ge_data` rear order and columns in `weeks` order; for example, each
+#'   rear's fish-weighted weekly means. They are standardized with the mean
+#'   and SD of the shared weekly series, so `beta` and `beta_outflow` keep the
+#'   scale of a fit without them. Detection (p) keeps the shared weekly spill.
+#'   When `NULL`, every rear uses the shared weekly values.
 #' @param target_rear Rear code whose parent hierarchy supplies the default
 #'   grouping and whose GE will usually be passed to SCRAPI2. Default `"W"`.
 #' @param parent Optional common parent-group vector. When `NULL`, the parent
@@ -97,7 +104,9 @@ fit_ge_rear_model2 <- function(
     n_thin = 10,
     seed = 11,
     rhat_threshold = 1.01,
-    verbose = TRUE) {
+    verbose = TRUE,
+    psi_spill = NULL,
+    psi_outflow = NULL) {
 
   rear_structure <- match.arg(rear_structure)
   phi_structure <- match.arg(phi_structure)
@@ -262,6 +271,31 @@ fit_ge_rear_model2 <- function(
   outflow_mean <- mean(outflow)
   outflow_sd <- stats::sd(outflow)
   outflow_std <- (outflow - outflow_mean) / outflow_sd
+  rear_psi_covariates <- c(spill = !is.null(psi_spill),
+                           outflow = !is.null(psi_outflow))
+  rear_matrix <- function(x, name, shared, lower = -Inf, upper = Inf) {
+    dn <- list(rear_levels, as.character(weeks))
+    if (is.null(x)) return(matrix(shared, R, S, byrow = TRUE, dimnames = dn))
+    if (!is.matrix(x) || !is.numeric(x) || !identical(dim(x), c(R, S)) ||
+        any(!is.finite(x)) || any(x < lower | x > upper)) {
+      stop(name, " must be an R x S matrix of finite values",
+           if (is.finite(upper)) paste0(" in [", lower, ", ", upper, "]"),
+           ", ordered by rear and week.", call. = FALSE)
+    }
+    if (!is.null(rownames(x)) && !identical(rownames(x), rear_levels)) {
+      stop(name, " row names must match the ge_data rear order.", call. = FALSE)
+    }
+    if (!is.null(colnames(x)) && !identical(colnames(x), as.character(weeks))) {
+      stop(name, " column names must match the ISO weeks.", call. = FALSE)
+    }
+    matrix(as.numeric(x), R, S, dimnames = dn)
+  }
+  psi_spill <- rear_matrix(psi_spill, "psi_spill", lgr, 0, 100)
+  psi_outflow <- rear_matrix(psi_outflow, "psi_outflow", outflow)
+  # Standardized with the shared weekly series so beta and beta_outflow keep
+  # the scale of a fit without rear-specific covariates.
+  psi_spill_std <- (psi_spill - lgr_mean) / lgr_sd
+  psi_outflow_std <- (psi_outflow - outflow_mean) / outflow_sd
 
   if (is.null(parent)) parent <- target$parent
   if (is.null(parent)) parent <- seq_len(S)
@@ -305,7 +339,8 @@ fit_ge_rear_model2 <- function(
     N_lik = nrow(lik), lik_r = as.integer(lik[, "row"]),
     lik_s = as.integer(lik[, "col"]), parent = as.integer(parent),
     n_strat = n_strat, lgr_spill_std = lgr_std,
-    outflow_std = outflow_std, lgs_spill_std = lgs_std
+    psi_spill_std = unname(psi_spill_std),
+    psi_outflow_std = unname(psi_outflow_std), lgs_spill_std = lgs_std
   ), phi_prior)
   if (R > 1L) jd$rear_sd_scale <- rear_sd_scale
   if (!is.null(trans_on)) jd$trans_on <- unname(trans_on)
@@ -509,8 +544,8 @@ fit_ge_rear_model2 <- function(
       for (s in 1:S) {
         logit_psi[r,s] ~ dnorm(
           mu_strat[parent[s]] + rear_psi[r] +
-          beta * lgr_spill_std[s] +
-          beta_outflow * outflow_std[s],
+          beta * psi_spill_std[r,s] +
+          beta_outflow * psi_outflow_std[r,s],
           tau_psi)
         psi[r,s] <- ilogit(logit_psi[r,s])
       }
@@ -699,6 +734,8 @@ fit_ge_rear_model2 <- function(
     lgr_spill_pct = lgr, lgr_spill_std = lgr_std,
     outflow_mean = outflow_mean, outflow_sd = outflow_sd,
     outflow = as.numeric(outflow), outflow_std = outflow_std,
+    psi_spill_pct = psi_spill, psi_spill_std = psi_spill_std,
+    psi_outflow = psi_outflow, psi_outflow_std = psi_outflow_std,
     lgs_spill_mean = lgs_mean, lgs_spill_sd = lgs_sd,
     strat_assign = data.frame(Week = weeks, Collapse = seq_len(S)),
     model_string = model_string, jags_data = jd, trans_on = trans_on,
@@ -711,6 +748,7 @@ fit_ge_rear_model2 <- function(
       delta_mode = delta_mode, delta_sd = delta_sd,
       rear_sd_scale = rear_sd_scale, phi_prior_source = prior_source,
       psi_covariates = c("percent spill", "outflow"),
+      rear_specific_psi_covariates = rear_psi_covariates,
       shared_processes = c(
         "seasonal hierarchy", "covariate slopes",
         "process variance hyperparameters",
