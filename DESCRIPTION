@@ -23,6 +23,9 @@ Imports:
     Hmisc,
     stats
 Suggests:
+    DBI,
+    odbc,
+    readxl,
     rjags,
     coda,
     testthat (>= 3.0.0)
