@@ -24,6 +24,9 @@ Imports:
     Hmisc,
     stats
 Suggests:
+    DBI,
+    odbc,
+    readxl,
     suncalc,
     rjags,
     coda,
