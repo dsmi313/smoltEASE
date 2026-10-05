@@ -72,7 +72,8 @@ generate_rear_ge_draws_daynight <- function(
     pn <- clamp(col("psi_night", ss))
     a <- col("a", ss)
     p_d <- clamp(col("p", ss))
-    p_n <- stats::plogis(stats::qlogis(p_d) + p_off)
+    p_n <- if (isTRUE(ge_fit$joint_grs_detection)) clamp(col("p_night", ss)) else
+      stats::plogis(stats::qlogis(p_d) + p_off)
     adj <- if (is.finite(spill_day[d]) && is.finite(flow_day[d])) {
       beta * ((spill_day[d] - ge_fit$spill_mean) / ge_fit$spill_sd - ge_fit$psi_spill_std[r, ss]) +
         beta_outflow * ((flow_day[d] - ge_fit$outflow_mean) / ge_fit$outflow_sd -
