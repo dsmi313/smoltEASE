@@ -1,7 +1,8 @@
 Package: smoltEASE
 Type: Package
+Encoding: UTF-8
 Title: Applying EASE uncertainty within SCRAPI smolt estimates
-Version: 0.1.7
+Version: 0.1.8
 Authors@R: c(
     person("David", "Smith", email = "david.smith@idfg.idaho.gov", role = c("aut", "cre")),
     person("Thomas", "Delomas", role = "ctb")
@@ -23,6 +24,7 @@ Imports:
     Hmisc,
     stats
 Suggests:
+    suncalc,
     rjags,
     coda,
     testthat (>= 3.0.0)
@@ -30,3 +32,4 @@ Config/testthat/edition: 3
 License: GPL-3
 URL: https://github.com/dsmi313/smoltEASE
 BugReports: https://github.com/dsmi313/smoltEASE/issues
+RoxygenNote: 7.3.1

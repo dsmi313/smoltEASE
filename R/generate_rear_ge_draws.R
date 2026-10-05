@@ -7,6 +7,17 @@
 #' daily values. Legacy fits containing an interaction coefficient remain
 #' readable, but new fits from [fit_ge_rear_model2()] are additive.
 #'
+#' By default the daily adjustment for a day is measured from the weekly
+#' spill and outflow the fit stored for `rear_type`: plain weekly means, or
+#' rear-specific values if the fit used `psi_spill` and `psi_outflow`. The
+#' weekly GE,
+#' however, describes the fish that passed that week, so when most fish pass
+#' on a few days the weekly GE mainly reflects conditions on those days. With
+#' `centering = TRUE`, the adjustment is instead measured from the
+#' fish-weighted mean spill and outflow of the week, using the daily weights
+#' in `center_weights`. Days that look like the days most fish passed then
+#' stay near the weekly GE, and only days that differ from them are moved.
+#'
 #' @param ge_fit Result from [fit_ge_rear_model2()].
 #' @param rear_type Rear group to extract. Defaults to the fit's target rear.
 #' @param strat_assign Date-to-model-row mapping. Defaults to
@@ -18,6 +29,16 @@
 #'   `spill.per`, and `outflow`. The argument retains its historical name for
 #'   compatibility. `outflow` should be the daily mean of the hourly flow rate,
 #'   not a sum of hourly rates.
+#' @param centering Logical. If `TRUE`, center each model row's daily
+#'   adjustment on the fish-weighted mean of its daily covariates instead of
+#'   the fit's weekly values. Requires `daily_spill` and
+#'   `center_weights`. Default `FALSE` (original behavior).
+#' @param center_weights Data frame with `Date` and `weight`: the number of
+#'   fish of `rear_type` passing LGR on each day (for example guided fish plus
+#'   spilled GRS-detected fish divided by that week's detection probability).
+#'   Days absent from the table get weight 0. Used only when
+#'   `centering = TRUE`. A model row whose days have zero total weight keeps
+#'   the fit's weekly values.
 #' @param clip_to_ci Restrict sampling to complete MCMC rows where all weekly
 #'   psi values for `rear_type` fall inside their marginal intervals. Default
 #'   `FALSE`; full-posterior sampling is recommended for uncertainty propagation.
@@ -30,7 +51,10 @@
 #' @param seed Optional sampling seed.
 #'
 #' @return Data frame with `SampleEndDate` followed by `boot_1` through
-#'   `boot_B`. Every column is one coherent posterior realization.
+#'   `boot_B`. Every column is one coherent posterior realization. When
+#'   `centering = TRUE`, attribute `center_reference` holds, for each model
+#'   row, the fit's weekly standardized spill and outflow, the fish-weighted
+#'   values used instead, and the total weight.
 #'
 #' @examples
 #' \dontrun{
@@ -38,6 +62,7 @@
 #'   rear_fit, rear_type = "W",
 #'   pass_dates = passageData$SampleEndDate,
 #'   B = 5000, daily_spill = lgr_daily_covariates,
+#'   centering = TRUE, center_weights = wild_daily_fish,
 #'   clip_to_ci = FALSE, seed = 11
 #' )
 #' }
@@ -55,7 +80,9 @@ generate_rear_ge_draws <- function(
     ci_upper = 0.975,
     strict_dates = TRUE,
     strict_daily_spill = TRUE,
-    seed = NULL) {
+    seed = NULL,
+    centering = FALSE,
+    center_weights = NULL) {
 
   parse_dates <- function(x, label) {
     if (inherits(x, "Date")) return(x)
@@ -78,7 +105,7 @@ generate_rear_ge_draws <- function(
   }
 
   B <- whole(B, "B")
-  for (nm in c("clip_to_ci", "strict_dates", "strict_daily_spill")) {
+  for (nm in c("clip_to_ci", "strict_dates", "strict_daily_spill", "centering")) {
     value <- get(nm)
     if (!is.logical(value) || length(value) != 1L || is.na(value)) {
       stop(nm, " must be TRUE or FALSE.", call. = FALSE)
@@ -98,6 +125,16 @@ generate_rear_ge_draws <- function(
     stop("ge_fit is missing: ", paste(missing, collapse = ", "), ".",
          call. = FALSE)
   }
+  if (centering) {
+    if (is.null(daily_spill)) {
+      stop("centering = TRUE requires daily_spill.", call. = FALSE)
+    }
+    if (!is.data.frame(center_weights) ||
+        !all(c("Date", "weight") %in% names(center_weights))) {
+      stop("centering = TRUE requires center_weights with Date and weight columns.",
+           call. = FALSE)
+    }
+  }
   if (is.null(rear_type)) rear_type <- ge_fit$target_rear
   r <- match(rear_type, ge_fit$rear_levels)
   if (length(r) != 1L || is.na(r)) {
@@ -105,7 +142,6 @@ generate_rear_ge_draws <- function(
          paste(ge_fit$rear_levels, collapse = ", "), ".", call. = FALSE)
   }
 
-  pass_dates_d <- parse_dates(pass_dates, "passage date")
   if (!is.data.frame(strat_assign)) {
     stop("strat_assign must be a data frame.", call. = FALSE)
   }
@@ -114,24 +150,27 @@ generate_rear_ge_draws <- function(
     map <- strat_assign[, c("Week", "Collapse"), drop = FALSE]
     if (anyDuplicated(map$Week)) stop("strat_assign has duplicate Week rows.",
                                      call. = FALSE)
-    s <- map$Collapse[match(as.integer(format(pass_dates_d, "%V")), map$Week)]
+    row_of <- function(d) map$Collapse[match(as.integer(format(d, "%V")), map$Week)]
   } else if (all(c("date", "stratum_idx") %in% names(strat_assign))) {
     map_dates <- parse_dates(strat_assign$date, "strat_assign date")
     if (anyDuplicated(map_dates)) stop("strat_assign has duplicate dates.",
                                       call. = FALSE)
-    s <- strat_assign$stratum_idx[match(pass_dates_d, map_dates)]
+    row_of <- function(d) strat_assign$stratum_idx[match(d, map_dates)]
   } else {
     stop("strat_assign needs Week/Collapse or date/stratum_idx columns.",
          call. = FALSE)
   }
-  valid_s <- !is.na(s) & s == floor(s) & s >= 1L & s <= length(ge_fit$weeks)
+  n_rows <- length(ge_fit$weeks)
+  pass_dates_d <- parse_dates(pass_dates, "passage date")
+  s <- row_of(pass_dates_d)
+  valid_s <- !is.na(s) & s == floor(s) & s >= 1L & s <= n_rows
   if (strict_dates && any(!valid_s)) {
     stop(sum(!valid_s), " passage date(s) have no fitted model row.",
          call. = FALSE)
   }
 
   mat <- do.call(rbind, lapply(ge_fit$samples, as.matrix))
-  psi_cols <- paste0("psi[", r, ",", seq_along(ge_fit$weeks), "]")
+  psi_cols <- paste0("psi[", r, ",", seq_len(n_rows), "]")
   coef_cols <- c("beta", "beta_outflow")
   if (!all(c(psi_cols, coef_cols) %in% colnames(mat))) {
     stop("The requested rear-specific psi or covariate draws are absent.",
@@ -172,6 +211,24 @@ generate_rear_ge_draws <- function(
   }
   ge <- matrix(season, nrow = length(pass_dates_d), ncol = B, byrow = TRUE)
 
+  # Reference covariates each day's adjustment is measured from. Default:
+  # the fit's weekly values for this rear (rear-specific when the fit used
+  # psi_spill / psi_outflow, otherwise the shared weekly means).
+  ref_spill <- if (is.matrix(ge_fit$psi_spill_std)) {
+    as.numeric(ge_fit$psi_spill_std[r, ])
+  } else {
+    ge_fit$lgr_spill_std
+  }
+  ref_flow <- if (is.matrix(ge_fit$psi_outflow_std)) {
+    as.numeric(ge_fit$psi_outflow_std[r, ])
+  } else {
+    ge_fit$outflow_std
+  }
+  fit_spill <- ref_spill
+  fit_flow <- ref_flow
+  ref_inter <- if (legacy_interaction) ge_fit$interaction_std else rep(0, n_rows)
+  center_reference <- NULL
+
   if (is.null(daily_spill)) {
     for (d in which(valid_s)) ge[d, ] <- psi[, s[d]]
   } else {
@@ -186,6 +243,41 @@ generate_rear_ge_draws <- function(
     }
     spill <- suppressWarnings(as.numeric(daily_spill$spill.per))
     outflow <- suppressWarnings(as.numeric(daily_spill$outflow))
+
+    if (centering) {
+      w_dates <- parse_dates(center_weights$Date, "center_weights date")
+      if (anyDuplicated(w_dates)) {
+        stop("center_weights contains duplicate dates.", call. = FALSE)
+      }
+      w <- suppressWarnings(as.numeric(center_weights$weight))
+      if (any(!is.finite(w) | w < 0)) {
+        stop("center_weights$weight must be finite and non-negative.",
+             call. = FALSE)
+      }
+      w_row <- row_of(w_dates)
+      w_spill <- (spill[match(w_dates, spill_dates)] - ge_fit$spill_mean) /
+        ge_fit$spill_sd
+      w_flow <- (outflow[match(w_dates, spill_dates)] - ge_fit$outflow_mean) /
+        ge_fit$outflow_sd
+      usable <- !is.na(w_row) & is.finite(w_spill) & is.finite(w_flow) & w > 0
+      total_w <- numeric(n_rows)
+      for (ss in seq_len(n_rows)) {
+        k <- usable & w_row == ss
+        if (!any(k)) next
+        total_w[ss] <- sum(w[k])
+        ref_spill[ss] <- sum(w[k] * w_spill[k]) / total_w[ss]
+        ref_flow[ss] <- sum(w[k] * w_flow[k]) / total_w[ss]
+        if (legacy_interaction) {
+          ref_inter[ss] <- sum(w[k] * w_spill[k] * w_flow[k]) / total_w[ss]
+        }
+      }
+      center_reference <- data.frame(
+        model_row = seq_len(n_rows), week = ge_fit$weeks,
+        spill_std_fit = fit_spill, spill_std_centered = ref_spill,
+        outflow_std_fit = fit_flow, outflow_std_centered = ref_flow,
+        total_weight = total_w)
+    }
+
     spill_day <- spill[match(pass_dates_d, spill_dates)]
     outflow_day <- outflow[match(pass_dates_d, spill_dates)]
     missing_spill <- valid_s &
@@ -200,27 +292,27 @@ generate_rear_ge_draws <- function(
       spill_x <- spill_day[d]
       flow_x <- outflow_day[d]
       if (!is.finite(spill_x) || !is.finite(flow_x)) {
-        spill_std <- ge_fit$lgr_spill_std[ss]
-        flow_std <- ge_fit$outflow_std[ss]
+        spill_std <- ref_spill[ss]
+        flow_std <- ref_flow[ss]
       } else {
         spill_std <- (spill_x - ge_fit$spill_mean) / ge_fit$spill_sd
         flow_std <- (flow_x - ge_fit$outflow_mean) / ge_fit$outflow_sd
       }
       interaction_adjustment <- if (legacy_interaction) {
-        beta_interaction * (
-          spill_std * flow_std - ge_fit$interaction_std[ss]
-        )
+        beta_interaction * (spill_std * flow_std - ref_inter[ss])
       } else {
         0
       }
       ge[d, ] <- stats::plogis(
         stats::qlogis(psi[, ss]) +
-          beta * (spill_std - ge_fit$lgr_spill_std[ss]) +
-          beta_outflow * (flow_std - ge_fit$outflow_std[ss]) +
+          beta * (spill_std - ref_spill[ss]) +
+          beta_outflow * (flow_std - ref_flow[ss]) +
           interaction_adjustment)
     }
   }
   ge <- pmin(pmax(ge, 0), 1)
   colnames(ge) <- paste0("boot_", seq_len(B))
-  data.frame(SampleEndDate = pass_dates, ge, check.names = FALSE)
+  out <- data.frame(SampleEndDate = pass_dates, ge, check.names = FALSE)
+  if (!is.null(center_reference)) attr(out, "center_reference") <- center_reference
+  out
 }
