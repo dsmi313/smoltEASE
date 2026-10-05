@@ -27,7 +27,9 @@ fit_ge_rear_daynight(
   n_thin = 10,
   seed = 11,
   rhat_threshold = 1.01,
-  verbose = TRUE
+  verbose = TRUE,
+  grs_detection = NULL,
+  q_night_offset = 0
 )
 }
 \arguments{
@@ -93,6 +95,17 @@ post-burn sampling iterations per chain before thinning.}
 \item{rhat_threshold}{R-hat warning threshold. Default 1.01.}
 
 \item{verbose}{Print model and diagnostic summaries.}
+
+\item{grs_detection}{Optional result of [prep_grs_detection()]. Adds a joint
+conditional row-history likelihood. Row detection is pooled across weeks
+and rears, separately for day/night, with independent Beta(1,1) row priors.
+Assumes conditional independence among rows and stable row performance.
+Effective p becomes q times probability of any array read. The existing
+hierarchical logit-p priors then apply to spillbay-1 routing q instead.}
+
+\item{q_night_offset}{Fixed logit offset for nighttime spillbay-1 routing,
+conditional on nonguided passage. Default zero assumes equal day/night q.
+With grs_detection supplied, p_night_offset must be zero.}
 }
 \value{
 A list like [fit_ge_rear_model2()], with `psi_summary` for the

@@ -33,6 +33,15 @@
 #'   night-passing spilled fish: logit p_night = logit p + p_night_offset.
 #'   0 (default) is the common-p model; nonzero values are for sensitivity.
 #' @inheritParams fit_ge_rear_model2
+#' @param grs_detection Optional result of [prep_grs_detection()]. Adds a joint
+#'   conditional row-history likelihood. Row detection is pooled across weeks
+#'   and rears, separately for day/night, with independent Beta(1,1) row priors.
+#'   Assumes conditional independence among rows and stable row performance.
+#'   Effective p becomes q times probability of any array read. The existing
+#'   hierarchical logit-p priors then apply to spillbay-1 routing q instead.
+#' @param q_night_offset Fixed logit offset for nighttime spillbay-1 routing,
+#'   conditional on nonguided passage. Default zero assumes equal day/night q.
+#'   With grs_detection supplied, p_night_offset must be zero.
 #' @return A list like [fit_ge_rear_model2()], with `psi_summary` for the
 #'   weekly mixture, `period_summary` (psi_day, psi_night, a), and the fields
 #'   [generate_rear_ge_draws_daynight()] needs.
@@ -45,7 +54,8 @@ fit_ge_rear_daynight <- function(
     day_ge = c("rear", "shared"), p_night_offset = 0,
     trans_on = NULL, phi_prior = NULL,
     n_iter = 30000, n_adapt = 2000, n_burnin = 10000, n_chains = 3,
-    n_thin = 10, seed = 11, rhat_threshold = 1.01, verbose = TRUE) {
+    n_thin = 10, seed = 11, rhat_threshold = 1.01, verbose = TRUE,
+    grs_detection = NULL, q_night_offset = 0) {
 
   if (!is.list(ge_dn) || is.null(names(ge_dn)) || length(ge_dn) < 2L ||
       anyDuplicated(names(ge_dn))) {
@@ -141,6 +151,44 @@ fit_ge_rear_daynight <- function(
     delta_sd = delta_sd, night_sd = night_sd, night_week_sd_scale = night_week_sd_scale,
     p_night_offset = p_night_offset
   ), phi_prior)
+  joint_detection <- !is.null(grs_detection)
+  detection_block <- ""
+  if (joint_detection) {
+    if (p_night_offset != 0) stop("Use q_night_offset with grs_detection; p_night_offset must be zero.", call. = FALSE)
+    if (length(q_night_offset) != 1L || !is.finite(q_night_offset)) stop("q_night_offset must be finite.", call. = FALSE)
+    gc <- grs_detection$counts
+    if (!identical(grs_detection$rear_levels, rear_levels) ||
+        !identical(as.integer(grs_detection$weeks), as.integer(weeks)) ||
+        !identical(dim(gc), c(R, S, 2L, 7L)) ||
+        anyNA(gc) || any(gc < 0 | gc != floor(gc)))
+      stop("grs_detection counts, weeks or rears do not match ge_dn.", call. = FALSE)
+    expected <- array(0, c(R, S, 2L))
+    for (r in seq_len(R)) {
+      expected[r,,1] <- rowSums(ge_dn[[r]]$n_day[,3:4,drop=FALSE])
+      expected[r,,2] <- rowSums(ge_dn[[r]]$n_night[,3:4,drop=FALSE])
+    }
+    if (any(apply(gc, 1:3, sum) != expected))
+      stop("Row histories must count exactly the GE spilled fish in each rear/week/period.", call. = FALSE)
+    jd$grs_counts <- apply(gc, c(3,4), sum)
+    jd$grs_total <- rowSums(jd$grs_counts)
+    if (any(jd$grs_total == 0)) stop("Need row histories for both day and night.", call. = FALSE)
+    jd$grs_patterns <- unname(as.matrix(expand.grid(U=0:1,M=0:1,D=0:1))[-1,,drop=FALSE])
+    jd$q_night_offset <- q_night_offset
+    jd$p_night_offset <- NULL
+    detection_block <- "
+    for (t in 1:2) {
+      for (k in 1:3) { row_detection[t,k] ~ dbeta(1,1) }
+      array_detection[t] <- 1 - (1-row_detection[t,1])*(1-row_detection[t,2])*(1-row_detection[t,3])
+      for (h in 1:7) {
+        for (k in 1:3) {
+          row_prob[t,h,k] <- pow(row_detection[t,k],grs_patterns[h,k])*pow(1-row_detection[t,k],1-grs_patterns[h,k])
+        }
+        history_prob[t,h] <- prod(row_prob[t,h,1:3])/array_detection[t]
+      }
+      grs_counts[t,1:7] ~ dmulti(history_prob[t,1:7],grs_total[t])
+    }
+    "
+  }
   if (!is.null(trans_on)) jd$trans_on <- unname(trans_on)
   transport_block <- if (is.null(trans_on)) {
     "trans[r,s] ~ dbeta(1, 1)"
@@ -168,6 +216,7 @@ fit_ge_rear_daynight <- function(
 
   model_string <- paste0("model {
     eps <- 1.0E-9
+", detection_block, "
 
     # Rear effects (as in fit_ge_rear_model2, full structure)
     tau_rear_psi <- pow(sigma_rear_psi + 1.0E-6, -2)
@@ -221,8 +270,15 @@ fit_ge_rear_daynight <- function(
     for (r in 1:R) {
       for (s in 1:S) {
         logit_p[r,s] ~ dnorm(mu_strat_p[parent[s]] + rear_p[r] + beta_p * lgr_spill_std[s], tau_p)
+", if (joint_detection) "
+        q[r,s] <- ilogit(logit_p[r,s])
+        q_night[r,s] <- ilogit(logit_p[r,s] + q_night_offset)
+        p[r,s] <- q[r,s]*array_detection[1]
+        p_night[r,s] <- q_night[r,s]*array_detection[2]
+" else "
         p[r,s] <- ilogit(logit_p[r,s])
         p_night[r,s] <- ilogit(logit_p[r,s] + p_night_offset)
+", "
       }
     }
     for (g in 1:n_strat) { mu_strat_p[g] ~ dnorm(alpha_p, tau_strat_p) }
@@ -301,6 +357,7 @@ fit_ge_rear_daynight <- function(
                "sigma_beta_phi_rear", "sigma_phi_rear", "rear_psi", "rear_p",
                "sigma_rear_psi", "sigma_rear_p", "rear_phi", "sigma_rear_phi",
                "delta", "delta0", "sigma_delta", "rear_delta", "sigma_rear_delta")
+  if (joint_detection) monitor <- c(monitor, "q", "q_night", "row_detection", "array_detection")
   if (verbose) {
     message("Day/night six-cell fit (day GE ", day_ge, ", p night offset ", p_night_offset,
             "): ", R, " rears x ", S, " weeks; ", nrow(lik), " nonempty rear-weeks; ", n_chains, " chains x ", n_iter,
@@ -335,6 +392,7 @@ fit_ge_rear_daynight <- function(
                        "^delta\\[|^night_mu\\[|^rear_(psi|p|phi|delta)\\[|",
                        "^(alpha|beta|beta_outflow|sigma_psi|sigma_night|sigma_rear_psi|sigma_rear_p)$"),
                 summary$parameter)
+  if (joint_detection) core <- core | grepl("^(p_night|q|q_night|row_detection|array_detection)\\[", summary$parameter)
   diagnostics <- list(threshold = rhat_threshold, all_rhat_pass = !any(bad),
                       core_ge_rhat_pass = !any(bad & core),
                       flagged_core_ge_parameters = summary[bad & core, , drop = FALSE])
@@ -371,6 +429,8 @@ fit_ge_rear_daynight <- function(
     psi_summary = psi_summary, period_summary = period_summary,
     rear_levels = rear_levels, target_rear = target_rear, weeks = weeks,
     day_ge = day_ge, p_night_offset = p_night_offset,
+    joint_grs_detection = joint_detection, q_night_offset = q_night_offset,
+    grs_detection = grs_detection,
     parent = parent, n = n, N_seen = N_seen,
     spill_mean = lgr_mean, spill_sd = lgr_sd, lgr_spill_pct = lgr, lgr_spill_std = lgr_std,
     outflow_mean = outflow_mean, outflow_sd = outflow_sd, outflow = outflow,
