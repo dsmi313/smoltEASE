@@ -1,0 +1,23 @@
+name: Passage covariate tests
+on:
+  pull_request:
+    paths:
+      - 'R/rear_ge_covariates.R'
+      - 'tests/testthat/test-passage-weighted-covariates.R'
+      - '.github/workflows/passage-covariate-tests.yaml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  covariates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install test dependencies
+        run: Rscript -e 'install.packages(c("dplyr", "testthat"))'
+      - name: Test passage weights and spill decay without fitting models
+        run: |
+          Rscript -e 'source("R/rear_ge_covariates.R"); testthat::test_file("tests/testthat/test-passage-weighted-covariates.R", stop_on_failure = TRUE)'
