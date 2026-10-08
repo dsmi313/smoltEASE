@@ -142,3 +142,42 @@ test_that("day/night preparation preserves six-cell counts and LGR clock times",
   expect_equal(dn$tags$lgr_time[match("t", dn$tags$tag)],
                as.POSIXct("2025-04-14 12:00:00", tz = "UTC"))
 })
+
+test_that("daily_weights calibrates daily GE to the weekly estimate", {
+  skip_if_not_installed("coda")
+  pd <- c(.02, .03); pn <- c(.1, .12)
+  fit <- make_dn_fit(pd = pd, pn = pn, a = c(.3, .3))
+  days <- as.Date("2025-04-14") + 0:6
+  cov <- data.frame(Date = days, spill.per = c(95, 90, 85, 70, 50, 30, 10), outflow = 80)
+  counts <- data.frame(Date = days, S_day = 0, S_night = 0)
+  wts <- data.frame(rear_type = "W", date = days, week = 16L, weight = c(5, 8, 3, 6, 2, 9, 4))
+  out <- generate_rear_ge_draws_daynight(fit, pass_dates = days, B = 2, daily_spill = cov,
+                                        spill_counts = counts, seed = 1, daily_weights = wts)
+  off <- attr(out, "calibration_offset")
+  id <- attr(out, "draw_id")
+  zs <- (cov$spill.per - 70) / 20
+  for (b in 1:2) {
+    gd <- plogis(qlogis(pd[id[b]]) - zs + off$day[1, b])
+    gn <- plogis(qlogis(pn[id[b]]) - zs + off$night[1, b])
+    expect_equal(sum(wts$weight * gd) / sum(wts$weight), pd[id[b]], tolerance = 1e-9)
+    expect_equal(sum(wts$weight * gn) / sum(wts$weight), pn[id[b]], tolerance = 1e-9)
+  }
+  expect_true(all(off$day < 0))
+  plain <- generate_rear_ge_draws_daynight(fit, pass_dates = days, B = 2, daily_spill = cov,
+                                          spill_counts = counts, seed = 1)
+  expect_true(all(as.matrix(out[, -1]) < as.matrix(plain[, -1])))
+  expect_null(attr(plain, "calibration_offset"))
+})
+
+test_that("calibration leaves GE unchanged at constant covariates", {
+  skip_if_not_installed("coda")
+  fit <- make_dn_fit(pd = rep(.02, 2), pn = rep(.3, 2), a = rep(.25, 2))
+  counts <- data.frame(Date = spill_on_ref$Date, S_day = 0, S_night = 0)
+  wts <- data.frame(rear_type = "W", date = spill_on_ref$Date, week = 16L, weight = c(1, 3))
+  a <- generate_rear_ge_draws_daynight(fit, pass_dates = spill_on_ref$Date, B = 2,
+                                      daily_spill = spill_on_ref, spill_counts = counts, seed = 3)
+  b <- generate_rear_ge_draws_daynight(fit, pass_dates = spill_on_ref$Date, B = 2,
+                                      daily_spill = spill_on_ref, spill_counts = counts, seed = 3,
+                                      daily_weights = wts)
+  expect_equal(as.matrix(a[, -1]), as.matrix(b[, -1]), tolerance = 1e-10)
+})
