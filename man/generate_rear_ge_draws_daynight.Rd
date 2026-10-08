@@ -13,7 +13,8 @@ generate_rear_ge_draws_daynight(
   spill_counts,
   shrink_k = 10,
   strict_daily_spill = TRUE,
-  seed = NULL
+  seed = NULL,
+  daily_weights = NULL
 )
 }
 \arguments{
@@ -35,11 +36,17 @@ same covariate definition (including any lag) as the fit.}
 \item{strict_daily_spill}{Stop if a date lacks spill or outflow.}
 
 \item{seed}{Posterior sampling seed.}
+
+\item{daily_weights}{Optional daily passage weights, normally
+`prep_rear_ge_covariates(...)$daily_weights`: rear_type, date, week, weight.
+Supply it to calibrate daily GE to the weekly estimates (recommended).}
 }
 \value{
 Data frame with SampleEndDate and boot_1 through boot_B. Attributes
   draw_id, night_fraction, and p_effective preserve draw alignment and
-  effective GRS detection probabilities for route checks.
+  effective GRS detection probabilities for route checks. With
+  daily_weights, attribute calibration_offset holds the day and night
+  week-by-draw logit offsets.
 }
 \description{
 Adjusts day and night GE to daily covariates, centered on the fit's rear
@@ -49,4 +56,15 @@ counts never enter it. Its detected-spill share is shrunk toward the
 weekly model value with shrink_k pseudo-fish. Days with no detections
 use that weekly detected-spill share. At reference covariates this
 recovers the week's night share of fish exactly.
+}
+\details{
+Weekly psi_day and psi_night are passage-weighted means of daily GE, not GE
+at the weekly mean covariate. Because GE is nonlinear in its covariates,
+shifting the weekly logit by each day's covariate deviation makes the
+passage-weighted mean of the daily values drift from the weekly estimate
+(upward when GE is small and varies within the week). When daily_weights is
+supplied, one logit offset per week and draw, separately for day and night,
+is added so the weighted mean of daily day (night) GE equals that draw's
+weekly psi_day (psi_night). Without daily_weights the uncalibrated
+behaviour of earlier versions is kept.
 }
