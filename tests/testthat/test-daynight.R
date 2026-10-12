@@ -82,7 +82,7 @@ test_that("no detections retain the weekly detected-spill share off reference", 
   expect_equal(unname(unlist(out[1, -1])), rep(f * gn + (1 - f) * gd, 2), tolerance = 1e-10)
 })
 
-test_that("both day GE structures compile and sample with scheduled transport", {
+test_that("all day GE structures compile and sample with scheduled transport", {
   skip_if_not_installed("rjags")
   skip_if_not_installed("coda")
   make_group <- function() {
@@ -103,7 +103,7 @@ test_that("both day GE structures compile and sample with scheduled transport", 
   }
   dn <- list(H = make_group(), W = make_group())
   schedule <- matrix(rep(c(0, 1, 1, 0), 2), 2, 4, byrow = TRUE)
-  for (mode in c("rear", "shared")) {
+  for (mode in c("rear", "shared", "hybrid")) {
     fit <- suppressWarnings(fit_ge_rear_daynight(
       dn, day_ge = mode, p_night_offset = .5, trans_on = schedule,
       n_adapt = 100, n_burnin = 100, n_iter = 200,
@@ -113,6 +113,16 @@ test_that("both day GE structures compile and sample with scheduled transport", 
     expect_true(all(is.finite(fit$period_summary$psi_night)))
     expect_true(all(fit$summary$mean[fit$summary$parameter %in%
                     c("trans[1,1]", "trans[1,4]", "trans[2,1]", "trans[2,4]")] == 0))
+    if (mode == "hybrid") {
+      u <- fit$summary$mean[grepl("^u_rw\\[", fit$summary$parameter)]
+      expect_equal(length(u), 8L)
+      # centered within week: the two rears' departures sum to zero each week
+      um <- matrix(u, 2)
+      expect_true(all(abs(colSums(um)) < 1e-8))
+      expect_true("sigma_rw" %in% fit$summary$parameter)
+    } else {
+      expect_false(any(grepl("^u_rw\\[|^sigma_rw$", fit$summary$parameter)))
+    }
   }
 })
 

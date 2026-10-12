@@ -16,7 +16,8 @@ fit_ge_rear_daynight(
   phi_slope_sd_scale = 0.5,
   night_sd = 2.5,
   night_week_sd_scale = 1,
-  day_ge = c("rear", "shared"),
+  day_ge = c("rear", "shared", "hybrid"),
+  rear_week_sd_scale = 0.5,
   p_night_offset = 0,
   trans_on = NULL,
   phi_prior = NULL,
@@ -71,7 +72,19 @@ night effect around its rear mean.}
 differ only by a constant offset (plus their own covariate values):
 logit psi_day[r,s] = eta[s] + rear_psi[r] + covariates[r,s],
 eta[s] ~ Normal(mu_strat[parent[s]], sigma_psi). Use when one rear has
-too few daytime guided fish to estimate its own weekly day GE.}
+too few daytime guided fish to estimate its own weekly day GE.
+"hybrid": the shared weekly residual plus a rear-specific weekly
+departure, centered within week:
+logit psi_day[r,s] = eta[s] + rear_psi[r] + covariates[r,s] + u_rw[r,s],
+u_rw[r,s] = sigma_rw * (z[r,s] - mean(z[,s])), z ~ Normal(0, 1).
+Rears borrow the common week pattern but can depart from it week by week;
+sigma_rw is estimated, so the fit moves toward "shared" when rears track
+each other. With two rears the departures are mirror images with SD
+sigma_rw / sqrt(2).}
+
+\item{rear_week_sd_scale}{Half-normal prior scale for sigma_rw, the SD of
+the rear-specific weekly departures (logit scale). Used only when
+day_ge = "hybrid".}
 
 \item{p_night_offset}{Fixed logit-scale offset for GRS detection of
 night-passing spilled fish: logit p_night = logit p + p_night_offset.
