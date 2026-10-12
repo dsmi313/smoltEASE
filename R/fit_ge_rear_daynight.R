@@ -29,6 +29,17 @@
 #'   logit psi_day[r,s] = eta[s] + rear_psi[r] + covariates[r,s],
 #'   eta[s] ~ Normal(mu_strat[parent[s]], sigma_psi). Use when one rear has
 #'   too few daytime guided fish to estimate its own weekly day GE.
+#'   "hybrid": the shared weekly residual plus a rear-specific weekly
+#'   departure, centered within week:
+#'   logit psi_day[r,s] = eta[s] + rear_psi[r] + covariates[r,s] + u_rw[r,s],
+#'   u_rw[r,s] = sigma_rw * (z[r,s] - mean(z[,s])), z ~ Normal(0, 1).
+#'   Rears borrow the common week pattern but can depart from it week by week;
+#'   sigma_rw is estimated, so the fit moves toward "shared" when rears track
+#'   each other. With two rears the departures are mirror images with SD
+#'   sigma_rw / sqrt(2).
+#' @param rear_week_sd_scale Half-normal prior scale for sigma_rw, the SD of
+#'   the rear-specific weekly departures (logit scale). Used only when
+#'   day_ge = "hybrid".
 #' @param p_night_offset Fixed logit-scale offset for GRS detection of
 #'   night-passing spilled fish: logit p_night = logit p + p_night_offset.
 #'   0 (default) is the common-p model; nonzero values are for sensitivity.
@@ -51,7 +62,7 @@ fit_ge_rear_daynight <- function(
     psi_spill = NULL, psi_outflow = NULL,
     delta_sd = 0.5, rear_sd_scale = 1, phi_slope_sd_scale = 0.5,
     night_sd = 2.5, night_week_sd_scale = 1,
-    day_ge = c("rear", "shared"), p_night_offset = 0,
+    day_ge = c("rear", "shared", "hybrid"), rear_week_sd_scale = 0.5, p_night_offset = 0,
     trans_on = NULL, phi_prior = NULL,
     n_iter = 30000, n_adapt = 2000, n_burnin = 10000, n_chains = 3,
     n_thin = 10, seed = 11, rhat_threshold = 1.01, verbose = TRUE,
@@ -69,6 +80,10 @@ fit_ge_rear_daynight <- function(
     }
   }
   day_ge <- match.arg(day_ge)
+  if (!is.numeric(rear_week_sd_scale) || length(rear_week_sd_scale) != 1L ||
+      !is.finite(rear_week_sd_scale) || rear_week_sd_scale <= 0) {
+    stop("rear_week_sd_scale must be one positive number.", call. = FALSE)
+  }
   if (!is.numeric(p_night_offset) || length(p_night_offset) != 1L || !is.finite(p_night_offset)) {
     stop("p_night_offset must be one finite number.", call. = FALSE)
   }
@@ -151,6 +166,7 @@ fit_ge_rear_daynight <- function(
     delta_sd = delta_sd, night_sd = night_sd, night_week_sd_scale = night_week_sd_scale,
     p_night_offset = p_night_offset
   ), phi_prior)
+  if (day_ge == "hybrid") jd$rear_week_sd_scale <- rear_week_sd_scale
   joint_detection <- !is.null(grs_detection)
   detection_block <- ""
   if (joint_detection) {
@@ -203,13 +219,26 @@ fit_ge_rear_daynight <- function(
           beta * psi_spill_std[r,s] +
           beta_outflow * psi_outflow_std[r,s],
           tau_psi)"
-  } else {
+  } else if (day_ge == "shared") {
     "logit_psi[r,s] <- eta[s] + rear_psi[r] +
           beta * psi_spill_std[r,s] +
           beta_outflow * psi_outflow_std[r,s]"
+  } else {
+    "logit_psi[r,s] <- eta[s] + rear_psi[r] +
+          beta * psi_spill_std[r,s] +
+          beta_outflow * psi_outflow_std[r,s] + u_rw[r,s]"
   }
   eta_block <- if (day_ge == "shared") {
     "for (s in 1:S) { eta[s] ~ dnorm(mu_strat[parent[s]], tau_psi) }"
+  } else if (day_ge == "hybrid") {
+    "for (s in 1:S) { eta[s] ~ dnorm(mu_strat[parent[s]], tau_psi) }
+    # Rear-specific weekly departures, non-centered and centered within week.
+    for (r in 1:R) { for (s in 1:S) { z_rw[r,s] ~ dnorm(0, 1) } }
+    for (s in 1:S) {
+      z_rw_mean[s] <- mean(z_rw[1:R,s])
+      for (r in 1:R) { u_rw[r,s] <- sigma_rw * (z_rw[r,s] - z_rw_mean[s]) }
+    }
+    sigma_rw ~ dnorm(0, pow(rear_week_sd_scale, -2)) T(0,)"
   } else {
     ""
   }
@@ -351,7 +380,8 @@ fit_ge_rear_daynight <- function(
     if (!requireNamespace(pkg, quietly = TRUE)) stop("Install R package '", pkg, "' and JAGS.", call. = FALSE)
   }
   monitor <- c("psi", "psi_day", "psi_night", "a", "night_eff", "night_mu", "sigma_night",
-               "p", "p_night", if (day_ge == "shared") "eta", "phi_S", "phi_B", "trans", "alpha", "beta", "beta_outflow",
+               "p", "p_night", if (day_ge %in% c("shared", "hybrid")) "eta",
+               if (day_ge == "hybrid") c("u_rw", "sigma_rw"), "phi_S", "phi_B", "trans", "alpha", "beta", "beta_outflow",
                "sigma_psi", "mu_strat", "sigma_strat", "alpha_p", "beta_p", "sigma_p",
                "mu_strat_p", "sigma_strat_p", "alpha_phi", "beta_phi", "beta_phi_rear",
                "sigma_beta_phi_rear", "sigma_phi_rear", "rear_psi", "rear_p",
@@ -390,7 +420,7 @@ fit_ge_rear_daynight <- function(
   bad <- !is.finite(summary$Rhat) | summary$Rhat > rhat_threshold
   core <- grepl(paste0("^psi\\[|^psi_day\\[|^psi_night\\[|^a\\[|^p\\[|^phi_[SB]\\[|",
                        "^delta\\[|^night_mu\\[|^rear_(psi|p|phi|delta)\\[|",
-                       "^(alpha|beta|beta_outflow|sigma_psi|sigma_night|sigma_rear_psi|sigma_rear_p)$"),
+                       "^(alpha|beta|beta_outflow|sigma_psi|sigma_night|sigma_rear_psi|sigma_rear_p|sigma_rw)$"),
                 summary$parameter)
   if (joint_detection) core <- core | grepl("^(p_night|q|q_night|row_detection|array_detection)\\[", summary$parameter)
   diagnostics <- list(threshold = rhat_threshold, all_rhat_pass = !any(bad),
@@ -442,6 +472,7 @@ fit_ge_rear_daynight <- function(
     model_string = model_string, jags_data = jd, trans_on = trans_on,
     settings = list(model = "six-cell rear-type, day/night split",
                     day_ge = day_ge, p_night_offset = p_night_offset,
+                    rear_week_sd_scale = if (day_ge == "hybrid") rear_week_sd_scale else NULL,
                     night_sd = night_sd, night_week_sd_scale = night_week_sd_scale,
                     n_iter = n_iter, n_adapt = n_adapt, n_burnin = n_burnin,
                     n_chains = n_chains, n_thin = n_thin, seed = seed))
