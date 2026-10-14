@@ -1,4 +1,4 @@
-#' Fit the rear-type six-cell GE model with a day/night split
+#' Fit the rear-type eleven-cell day/night GE model
 #'
 #' Extends [fit_ge_rear_model2()] (full rear structure, rear-flexible phi,
 #' free route offset) by splitting each rear-week into fish that passed LGR by
@@ -389,7 +389,7 @@ fit_ge_rear_daynight <- function(
                "delta", "delta0", "sigma_delta", "rear_delta", "sigma_rear_delta")
   if (joint_detection) monitor <- c(monitor, "q", "q_night", "row_detection", "array_detection")
   if (verbose) {
-    message("Day/night six-cell fit (day GE ", day_ge, ", p night offset ", p_night_offset,
+    message("Day/night eleven-cell fit (day GE ", day_ge, ", p night offset ", p_night_offset,
             "): ", R, " rears x ", S, " weeks; ", nrow(lik), " nonempty rear-weeks; ", n_chains, " chains x ", n_iter,
             " post-burn iterations, thin ", n_thin, ".")
   }
@@ -470,7 +470,7 @@ fit_ge_rear_daynight <- function(
     lgs_spill_mean = lgs_mean, lgs_spill_sd = lgs_sd,
     strat_assign = data.frame(Week = weeks, Collapse = seq_len(S)),
     model_string = model_string, jags_data = jd, trans_on = trans_on,
-    settings = list(model = "six-cell rear-type, day/night split",
+    settings = list(model = "eleven-cell rear-type, day/night split (six cells, c1 to c4 and c6 by period, c5 pooled)",
                     day_ge = day_ge, p_night_offset = p_night_offset,
                     rear_week_sd_scale = if (day_ge == "hybrid") rear_week_sd_scale else NULL,
                     night_sd = night_sd, night_week_sd_scale = night_week_sd_scale,

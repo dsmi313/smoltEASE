@@ -2,7 +2,7 @@
 % Please edit documentation in R/fit_ge_rear_daynight.R
 \name{fit_ge_rear_daynight}
 \alias{fit_ge_rear_daynight}
-\title{Fit the rear-type six-cell GE model with a day/night split}
+\title{Fit the rear-type eleven-cell day/night GE model}
 \usage{
 fit_ge_rear_daynight(
   ge_dn,
