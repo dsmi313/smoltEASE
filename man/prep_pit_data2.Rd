@@ -33,7 +33,8 @@ give a W-only analysis, while \code{include_unknown = TRUE} gives W+U and
 still excludes known hatchery fish. Default \code{FALSE}.}
 
 \item{tz}{Time zone used to parse \code{Obs Time Value}. Default
-\code{"UTC"}.}
+\code{"UTC"}. Times may be on a 12-hour clock with AM/PM, as PTAGIS
+writes them, or on a 24-hour clock.}
 }
 \value{
 A data frame with columns \code{tag}, \code{site},

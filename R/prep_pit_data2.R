@@ -20,7 +20,8 @@
 #'   give a W-only analysis, while \code{include_unknown = TRUE} gives W+U and
 #'   still excludes known hatchery fish. Default \code{FALSE}.
 #' @param tz Time zone used to parse \code{Obs Time Value}. Default
-#'   \code{"UTC"}.
+#'   \code{"UTC"}. Times may be on a 12-hour clock with AM/PM, as PTAGIS
+#'   writes them, or on a 24-hour clock.
 #'
 #' @return A data frame with columns \code{tag}, \code{site},
 #'   \code{det_time}, \code{det_date}, \code{antenna},
@@ -82,16 +83,7 @@ prep_pit_data2 <- function(pit,
   }
   if (!nrow(dat)) stop("No PIT records remain after filtering.", call. = FALSE)
 
-  raw_time <- trimws(as.character(dat[["Obs Time Value"]]))
-  det_time <- as.POSIXct(rep(NA_character_, length(raw_time)), tz = tz)
-  for (fmt in c("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
-                "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p",
-                "%Y-%m-%d %H:%M:%S")) {
-    unresolved <- which(is.na(det_time) & !is.na(raw_time) & nzchar(raw_time))
-    if (!length(unresolved)) break
-    det_time[unresolved] <- as.POSIXct(raw_time[unresolved], format = fmt,
-                                      tz = tz)
-  }
+  det_time <- .parse_clock_time(dat[["Obs Time Value"]], tz)
   if (anyNA(det_time)) {
     stop("Obs Time Value contains missing or unparseable timestamps.",
          call. = FALSE)

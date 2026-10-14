@@ -153,16 +153,7 @@ prep_ge_data2 <- function(
   }
   parent <- as.integer(factor(parent))
 
-  raw_spill_time <- trimws(as.character(spill_data$DateTime))
-  spill_time <- as.POSIXct(rep(NA_character_, length(raw_spill_time)), tz = tz)
-  for (fmt in c("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
-                "%Y-%m-%d %H:%M:%S")) {
-    unresolved <- which(is.na(spill_time) & !is.na(raw_spill_time) &
-                          nzchar(raw_spill_time))
-    if (!length(unresolved)) break
-    spill_time[unresolved] <- as.POSIXct(raw_spill_time[unresolved],
-                                        format = fmt, tz = tz)
-  }
+  spill_time <- .parse_clock_time(spill_data$DateTime, tz)
   spill <- data.frame(
     Site = trimws(as.character(spill_data$Site)), datetime = spill_time,
     HourlySpill = suppressWarnings(as.numeric(spill_data$HourlySpill)),
