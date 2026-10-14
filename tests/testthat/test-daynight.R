@@ -1,18 +1,35 @@
-test_that("classify_daynight splits at sunrise and sunset", {
+test_that("classify_daynight splits at sunrise and sunset on a daylight clock", {
   skip_if_not_installed("suncalc")
+  la <- "America/Los_Angeles"
   t <- as.POSIXct(c("2025-04-15 12:00:00", "2025-04-15 02:00:00",
                    "2025-04-15 23:00:00", NA), tz = "UTC")
-  expect_equal(classify_daynight(t), c("day", "night", "night", NA))
+  expect_equal(classify_daynight(t, tz_local = la), c("day", "night", "night", NA))
   t2 <- as.POSIXct(c("2025-04-15 19:30:00", "2025-04-15 19:45:00"), tz = "UTC")
-  expect_equal(classify_daynight(t2), c("day", "night"))
+  expect_equal(classify_daynight(t2, tz_local = la), c("day", "night"))
   sun <- suncalc::getSunlightTimes(as.Date("2025-04-15"),
                                   lat = 46.660394, lon = -117.436261,
-                                  keep = c("sunrise", "sunset"),
-                                  tz = "America/Los_Angeles")
+                                  keep = c("sunrise", "sunset"), tz = la)
+  boundaries <- c(sun$sunrise - 1, sun$sunrise, sun$sunset - 1, sun$sunset)
+  clocks <- as.POSIXct(format(boundaries, "%Y-%m-%d %H:%M:%OS6"),
+                      format = "%Y-%m-%d %H:%M:%OS", tz = "UTC")
+  expect_equal(classify_daynight(clocks, tz_local = la), c("night", "day", "day", "night"))
+})
+
+test_that("classify_daynight defaults to the PTAGIS clock, fixed PST", {
+  skip_if_not_installed("suncalc")
+  pst <- "Etc/GMT+8"
+  sun <- suncalc::getSunlightTimes(as.Date("2025-04-15"),
+                                  lat = 46.660394, lon = -117.436261,
+                                  keep = c("sunrise", "sunset"), tz = pst)
   boundaries <- c(sun$sunrise - 1, sun$sunrise, sun$sunset - 1, sun$sunset)
   clocks <- as.POSIXct(format(boundaries, "%Y-%m-%d %H:%M:%OS6"),
                       format = "%Y-%m-%d %H:%M:%OS", tz = "UTC")
   expect_equal(classify_daynight(clocks), c("night", "day", "day", "night"))
+  # 19:00 PST is 20:00 PDT, after sunset on 15 April: night on the PTAGIS clock,
+  # but day if the PST clock were wrongly compared with daylight-saving sun times.
+  t <- as.POSIXct("2025-04-15 19:00:00", tz = "UTC")
+  expect_equal(classify_daynight(t), "night")
+  expect_equal(classify_daynight(t, tz_local = "America/Los_Angeles"), "day")
 })
 
 make_dn_fit <- function(pd, pn, a, p = 0.5, p_off = 0) {

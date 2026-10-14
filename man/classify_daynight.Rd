@@ -8,16 +8,19 @@ classify_daynight(
   time,
   lat = 46.660394,
   lon = -117.436261,
-  tz_local = "America/Los_Angeles",
+  tz_local = "Etc/GMT+8",
   twilight = c("sunrise_sunset", "civil")
 )
 }
 \arguments{
-\item{time}{POSIXct detection times (local clock).}
+\item{time}{POSIXct detection times (clock times in \code{tz_local}).}
 
 \item{lat, lon}{Site coordinates; defaults are GRJ from PTAGIS.}
 
-\item{tz_local}{Local time zone for sun times, with daylight saving.}
+\item{tz_local}{Time zone of the detection clock, used for sun times.
+Default \code{"Etc/GMT+8"}, fixed Pacific Standard Time (UTC-8), as
+PTAGIS reports. Use a zone with daylight saving only for times recorded
+on a local daylight clock.}
 
 \item{twilight}{Use sunrise/sunset or civil dawn/dusk to delimit day.}
 }
@@ -26,6 +29,9 @@ Character vector day or night, NA where time is NA.
 }
 \description{
 Uses sunrise and sunset (or civil dawn and dusk) from suncalc.
-Detection times are treated as local clock times, whatever time zone label
-they carry. Pass PTAGIS times parsed as clock strings (for example UTC).
+Detection times are treated as clock times in \code{tz_local}, whatever time
+zone label they carry. Pass PTAGIS times parsed as clock strings (for
+example UTC). PTAGIS reports all times in Pacific Standard Time year-round
+(no daylight saving), so the default computes sun times on that clock;
+during daylight saving a PTAGIS time of 19:30 is 20:30 on a local clock.
 }

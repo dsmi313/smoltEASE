@@ -10,7 +10,7 @@ prep_ge_data_daynight(
   weeks,
   lat = 46.660394,
   lon = -117.436261,
-  tz_local = "America/Los_Angeles",
+  tz_local = "Etc/GMT+8",
   twilight = c("sunrise_sunset", "civil"),
   adult_sites = c("LGRLDR", "PRDLD1", "SHERFT", "BONAFF"),
   route_order = c(GRJ = 1, GRS = 1, GOJ = 2, LMJ = 3, ICH = 4),
