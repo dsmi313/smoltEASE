@@ -19,6 +19,7 @@ fit_ge_rear_daynight(
   day_ge = c("rear", "shared", "hybrid"),
   rear_week_sd_scale = 0.5,
   p_night_offset = 0,
+  p_structure = c("shared", "rear_flexible"),
   trans_on = NULL,
   phi_prior = NULL,
   n_iter = 30000,
@@ -89,6 +90,15 @@ day_ge = "hybrid".}
 \item{p_night_offset}{Fixed logit-scale offset for GRS detection of
 night-passing spilled fish: logit p_night = logit p + p_night_offset.
 0 (default) is the common-p model; nonzero values are for sensitivity.}
+
+\item{p_structure}{"shared" (default): the weekly GRS detection departures
+share one SD across rears, sigma_p. "rear_flexible": each rear has its own
+SD, sigma_p_rear[r] ~ Uniform(0.05, 3), so a rear with few fish is not held
+to the week pattern set by a rear with many (as phi_structure =
+"rear_flexible" does for recovery). Rears still share the week-group
+levels, the spill slope, and the sum-to-zero rear offset:
+logit p[r,s] ~ Normal(mu_strat_p[parent[s]] + rear_p[r] + beta_p * z[s],
+sigma_p_rear[r]).}
 
 \item{trans_on}{Optional R by S 0/1 matrix of known transport availability,
 with rows in `ge_data` rear order and columns in `weeks` order. Zero

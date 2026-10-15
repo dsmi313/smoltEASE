@@ -43,6 +43,14 @@
 #' @param p_night_offset Fixed logit-scale offset for GRS detection of
 #'   night-passing spilled fish: logit p_night = logit p + p_night_offset.
 #'   0 (default) is the common-p model; nonzero values are for sensitivity.
+#' @param p_structure "shared" (default): the weekly GRS detection departures
+#'   share one SD across rears, sigma_p. "rear_flexible": each rear has its own
+#'   SD, sigma_p_rear[r] ~ Uniform(0.05, 3), so a rear with few fish is not held
+#'   to the week pattern set by a rear with many (as phi_structure =
+#'   "rear_flexible" does for recovery). Rears still share the week-group
+#'   levels, the spill slope, and the sum-to-zero rear offset:
+#'   logit p[r,s] ~ Normal(mu_strat_p[parent[s]] + rear_p[r] + beta_p * z[s],
+#'   sigma_p_rear[r]).
 #' @inheritParams fit_ge_rear_model2
 #' @param grs_detection Optional result of [prep_grs_detection()]. Adds a joint
 #'   conditional row-history likelihood. Row detection is pooled across weeks
@@ -63,6 +71,7 @@ fit_ge_rear_daynight <- function(
     delta_sd = 0.5, rear_sd_scale = 1, phi_slope_sd_scale = 0.5,
     night_sd = 2.5, night_week_sd_scale = 1,
     day_ge = c("rear", "shared", "hybrid"), rear_week_sd_scale = 0.5, p_night_offset = 0,
+    p_structure = c("shared", "rear_flexible"),
     trans_on = NULL, phi_prior = NULL,
     n_iter = 30000, n_adapt = 2000, n_burnin = 10000, n_chains = 3,
     n_thin = 10, seed = 11, rhat_threshold = 1.01, verbose = TRUE,
@@ -80,6 +89,8 @@ fit_ge_rear_daynight <- function(
     }
   }
   day_ge <- match.arg(day_ge)
+  p_structure <- match.arg(p_structure)
+  p_flex <- p_structure == "rear_flexible"
   if (!is.numeric(rear_week_sd_scale) || length(rear_week_sd_scale) != 1L ||
       !is.finite(rear_week_sd_scale) || rear_week_sd_scale <= 0) {
     stop("rear_week_sd_scale must be one positive number.", call. = FALSE)
@@ -294,11 +305,16 @@ fit_ge_rear_daynight <- function(
     sigma_strat ~ dunif(0.05, 3)
 
     # GRS detection: common to day and night fish within a rear-week
-    tau_p <- pow(sigma_p, -2)
-    tau_strat_p <- pow(sigma_strat_p, -2)
+", if (p_flex) "    for (r in 1:R) {
+      sigma_p_rear[r] ~ dunif(0.05, 3)
+      tau_p_rear[r] <- pow(sigma_p_rear[r], -2)
+    }
+" else "    tau_p <- pow(sigma_p, -2)
+", "    tau_strat_p <- pow(sigma_strat_p, -2)
     for (r in 1:R) {
       for (s in 1:S) {
-        logit_p[r,s] ~ dnorm(mu_strat_p[parent[s]] + rear_p[r] + beta_p * lgr_spill_std[s], tau_p)
+        logit_p[r,s] ~ dnorm(mu_strat_p[parent[s]] + rear_p[r] + beta_p * lgr_spill_std[s], ",
+  if (p_flex) "tau_p_rear[r]" else "tau_p", ")
 ", if (joint_detection) "
         q[r,s] <- ilogit(logit_p[r,s])
         q_night[r,s] <- ilogit(logit_p[r,s] + q_night_offset)
@@ -313,8 +329,8 @@ fit_ge_rear_daynight <- function(
     for (g in 1:n_strat) { mu_strat_p[g] ~ dnorm(alpha_p, tau_strat_p) }
     alpha_p ~ dt(0, pow(2, -2), 7)
     beta_p ~ dt(0, pow(1, -2), 7)
-    sigma_p ~ dunif(0.05, 3)
-    sigma_strat_p ~ dunif(0.05, 3)
+", if (!p_flex) "    sigma_p ~ dunif(0.05, 3)
+", "    sigma_strat_p ~ dunif(0.05, 3)
 
     # Recovery: rear-flexible LGS slopes, as in fit_ge_rear_model2
     tau_beta_phi_rear <- pow(sigma_beta_phi_rear + 1.0E-6, -2)
@@ -382,14 +398,14 @@ fit_ge_rear_daynight <- function(
   monitor <- c("psi", "psi_day", "psi_night", "a", "night_eff", "night_mu", "sigma_night",
                "p", "p_night", if (day_ge %in% c("shared", "hybrid")) "eta",
                if (day_ge == "hybrid") c("u_rw", "sigma_rw"), "phi_S", "phi_B", "trans", "alpha", "beta", "beta_outflow",
-               "sigma_psi", "mu_strat", "sigma_strat", "alpha_p", "beta_p", "sigma_p",
+               "sigma_psi", "mu_strat", "sigma_strat", "alpha_p", "beta_p", if (p_flex) "sigma_p_rear" else "sigma_p",
                "mu_strat_p", "sigma_strat_p", "alpha_phi", "beta_phi", "beta_phi_rear",
                "sigma_beta_phi_rear", "sigma_phi_rear", "rear_psi", "rear_p",
                "sigma_rear_psi", "sigma_rear_p", "rear_phi", "sigma_rear_phi",
                "delta", "delta0", "sigma_delta", "rear_delta", "sigma_rear_delta")
   if (joint_detection) monitor <- c(monitor, "q", "q_night", "row_detection", "array_detection")
   if (verbose) {
-    message("Day/night eleven-cell fit (day GE ", day_ge, ", p night offset ", p_night_offset,
+    message("Day/night eleven-cell fit (day GE ", day_ge, ", p structure ", p_structure, ", p night offset ", p_night_offset,
             "): ", R, " rears x ", S, " weeks; ", nrow(lik), " nonempty rear-weeks; ", n_chains, " chains x ", n_iter,
             " post-burn iterations, thin ", n_thin, ".")
   }
@@ -458,7 +474,7 @@ fit_ge_rear_daynight <- function(
     samples = samples, summary = summary, diagnostics = diagnostics,
     psi_summary = psi_summary, period_summary = period_summary,
     rear_levels = rear_levels, target_rear = target_rear, weeks = weeks,
-    day_ge = day_ge, p_night_offset = p_night_offset,
+    day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure,
     joint_grs_detection = joint_detection, q_night_offset = q_night_offset,
     grs_detection = grs_detection,
     parent = parent, n = n, N_seen = N_seen,
@@ -471,7 +487,7 @@ fit_ge_rear_daynight <- function(
     strat_assign = data.frame(Week = weeks, Collapse = seq_len(S)),
     model_string = model_string, jags_data = jd, trans_on = trans_on,
     settings = list(model = "eleven-cell rear-type, day/night split (six cells, c1 to c4 and c6 by period, c5 pooled)",
-                    day_ge = day_ge, p_night_offset = p_night_offset,
+                    day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure,
                     rear_week_sd_scale = if (day_ge == "hybrid") rear_week_sd_scale else NULL,
                     night_sd = night_sd, night_week_sd_scale = night_week_sd_scale,
                     n_iter = n_iter, n_adapt = n_adapt, n_burnin = n_burnin,
