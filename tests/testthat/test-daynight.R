@@ -208,3 +208,40 @@ test_that("calibration leaves GE unchanged at constant covariates", {
                                       daily_weights = wts)
   expect_equal(as.matrix(a[, -1]), as.matrix(b[, -1]), tolerance = 1e-10)
 })
+
+test_that("p_structure rear_flexible gives each rear its own detection SD", {
+  skip_if_not_installed("rjags")
+  skip_if_not_installed("coda")
+  make_group <- function() {
+    day <- rbind(c(8, 2, 12, 2, 0, 0), c(7, 2, 10, 2, 0, 3),
+                 c(6, 1, 8, 1, 0, 4), c(7, 1, 10, 1, 0, 0))
+    night <- day
+    night[, 1] <- night[, 1] + 2L
+    c5 <- rep(2L, 4)
+    n <- day + night
+    n[, 5] <- c5
+    list(base = list(n = n, weeks = 13:16, parent = 1:4,
+                     lgr_spill_pct = c(25, 45, 65, 35),
+                     lgs_spill_pct = c(20, 40, 60, 30),
+                     lgr_outflow = c(70, 85, 100, 80),
+                     alpha_phi_mean = 0, alpha_phi_sd = 2,
+                     beta_phi_mean = 0, beta_phi_sd = 1),
+         n_day = day, n_night = night, n_c5 = c5)
+  }
+  dn <- list(H = make_group(), W = make_group())
+  for (ps in c("shared", "rear_flexible")) {
+    fit <- suppressWarnings(fit_ge_rear_daynight(
+      dn, p_structure = ps, n_adapt = 100, n_burnin = 100, n_iter = 200,
+      n_chains = 2, n_thin = 2, verbose = FALSE))
+    expect_identical(fit$p_structure, ps)
+    pars <- fit$summary$parameter
+    if (ps == "rear_flexible") {
+      expect_true(all(c("sigma_p_rear[1]", "sigma_p_rear[2]") %in% pars))
+      expect_false("sigma_p" %in% pars)
+    } else {
+      expect_true("sigma_p" %in% pars)
+      expect_false(any(grepl("^sigma_p_rear", pars)))
+    }
+    expect_true(all(is.finite(fit$summary$mean[grepl("^p\\[", pars)])))
+  }
+})
