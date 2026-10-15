@@ -229,7 +229,7 @@ test_that("p_structure rear_flexible gives each rear its own detection SD", {
          n_day = day, n_night = night, n_c5 = c5)
   }
   dn <- list(H = make_group(), W = make_group())
-  for (ps in c("shared", "rear_flexible")) {
+  for (ps in c("shared", "rear_flexible", "rear_strata")) {
     fit <- suppressWarnings(fit_ge_rear_daynight(
       dn, p_structure = ps, n_adapt = 100, n_burnin = 100, n_iter = 200,
       n_chains = 2, n_thin = 2, verbose = FALSE))
@@ -241,6 +241,12 @@ test_that("p_structure rear_flexible gives each rear its own detection SD", {
     } else {
       expect_true("sigma_p" %in% pars)
       expect_false(any(grepl("^sigma_p_rear", pars)))
+    }
+    if (ps == "rear_strata") {
+      expect_true(all(c("mu_strat_p_rear[1,1]", "mu_strat_p_rear[2,4]") %in% pars))
+      expect_false(any(grepl("^mu_strat_p\\[", pars)))
+    } else {
+      expect_false(any(grepl("^mu_strat_p_rear", pars)))
     }
     expect_true(all(is.finite(fit$summary$mean[grepl("^p\\[", pars)])))
   }
@@ -278,7 +284,7 @@ test_that("rear_offsets controls offset SDs across day/night model options", {
   options <- expand.grid(
     rear_offsets = c("hierarchical", "fixed"),
     day_ge = c("rear", "shared", "hybrid"),
-    p_structure = c("shared", "rear_flexible"),
+    p_structure = c("shared", "rear_flexible", "rear_strata"),
     joint_detection = c(FALSE, TRUE), stringsAsFactors = FALSE)
   for (i in seq_len(nrow(options))) {
     opt <- options[i, ]
@@ -305,3 +311,4 @@ test_that("rear_offsets controls offset SDs across day/night model options", {
     expect_true(all(is.finite(p_means)))
   }
 })
+

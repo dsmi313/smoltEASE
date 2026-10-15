@@ -19,7 +19,7 @@ fit_ge_rear_daynight(
   day_ge = c("rear", "shared", "hybrid"),
   rear_week_sd_scale = 0.5,
   p_night_offset = 0,
-  p_structure = c("shared", "rear_flexible"),
+  p_structure = c("shared", "rear_flexible", "rear_strata"),
   rear_offsets = c("hierarchical", "fixed"),
   trans_on = NULL,
   phi_prior = NULL,
@@ -99,7 +99,13 @@ to the week pattern set by a rear with many (as phi_structure =
 "rear_flexible" does for recovery). Rears still share the week-group
 levels, the spill slope, and the sum-to-zero rear offset:
 logit p[r,s] ~ Normal(mu_strat_p[parent[s]] + rear_p[r] + beta_p * z[s],
-sigma_p_rear[r]).}
+sigma_p_rear[r]). "rear_strata": each rear has its own week-group levels,
+so a rear's weekly detection pattern follows its own fish instead of the
+pattern set by the rear with more fish. The levels are centered on the
+rear offset and share one SD; the spill slope and the weekly departure SD
+stay shared:
+mu_strat_p_rear[r,g] ~ Normal(alpha_p + rear_p[r], sigma_strat_p),
+logit p[r,s] ~ Normal(mu_strat_p_rear[r,parent[s]] + beta_p * z[s], sigma_p).}
 
 \item{rear_offsets}{"hierarchical" (default) estimates SDs for the day GE
 and GRS detection rear offsets. "fixed" gives rear_psi_raw and rear_p_raw
@@ -165,3 +171,4 @@ be tested with these data; check sensitivity if it matters.
 Likelihood per rear-week: multinomial over 11 cells, day c1 c2 c3 c4 c6,
 night c1 c2 c3 c4 c6, and pooled c5, conditional on being seen.
 }
+

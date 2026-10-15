@@ -2,7 +2,7 @@ Package: smoltEASE
 Type: Package
 Encoding: UTF-8
 Title: Applying EASE uncertainty within SCRAPI smolt estimates
-Version: 0.1.15
+Version: 0.1.16
 Authors@R: c(
     person("David", "Smith", email = "david.smith@idfg.idaho.gov", role = c("aut", "cre")),
     person("Thomas", "Delomas", role = "ctb")
@@ -36,3 +36,4 @@ License: GPL-3
 URL: https://github.com/dsmi313/smoltEASE
 BugReports: https://github.com/dsmi313/smoltEASE/issues
 RoxygenNote: 7.3.1
+
