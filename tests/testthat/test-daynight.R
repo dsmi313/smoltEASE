@@ -245,3 +245,63 @@ test_that("p_structure rear_flexible gives each rear its own detection SD", {
     expect_true(all(is.finite(fit$summary$mean[grepl("^p\\[", pars)])))
   }
 })
+
+test_that("rear_offsets controls offset SDs across day/night model options", {
+  skip_if_not_installed("rjags")
+  skip_if_not_installed("coda")
+  make_group <- function() {
+    day <- rbind(c(8, 2, 12, 2, 0, 0), c(7, 2, 10, 2, 0, 3),
+                 c(6, 1, 8, 1, 0, 4), c(7, 1, 10, 1, 0, 0))
+    night <- day
+    night[, 1] <- night[, 1] + 2L
+    c5 <- rep(2L, 4)
+    n <- day + night
+    n[, 5] <- c5
+    list(base = list(n = n, weeks = 13:16, parent = 1:4,
+                     lgr_spill_pct = c(25, 45, 65, 35),
+                     lgs_spill_pct = c(20, 40, 60, 30),
+                     lgr_outflow = c(70, 85, 100, 80),
+                     alpha_phi_mean = 0, alpha_phi_sd = 2,
+                     beta_phi_mean = 0, beta_phi_sd = 1),
+         n_day = day, n_night = night, n_c5 = c5)
+  }
+  dn <- list(H = make_group(), W = make_group())
+  counts <- array(0L, c(2L, 4L, 2L, 7L))
+  for (r in 1:2) {
+    for (t in 1:2) {
+      period <- if (t == 1L) dn[[r]]$n_day else dn[[r]]$n_night
+      counts[r, , t, 1:6] <- 1L
+      counts[r, , t, 7] <- rowSums(period[, 3:4]) - 6L
+    }
+  }
+  grs <- list(counts = counts, rear_levels = names(dn), weeks = 13:16)
+  options <- expand.grid(
+    rear_offsets = c("hierarchical", "fixed"),
+    day_ge = c("rear", "shared", "hybrid"),
+    p_structure = c("shared", "rear_flexible"),
+    joint_detection = c(FALSE, TRUE), stringsAsFactors = FALSE)
+  for (i in seq_len(nrow(options))) {
+    opt <- options[i, ]
+    fit <- suppressWarnings(fit_ge_rear_daynight(
+      dn, rear_offsets = opt$rear_offsets, day_ge = opt$day_ge,
+      p_structure = opt$p_structure,
+      grs_detection = if (opt$joint_detection) grs else NULL,
+      n_adapt = 100, n_burnin = 100, n_iter = 200,
+      n_chains = 2, n_thin = 2, verbose = FALSE))
+    expect_identical(fit$rear_offsets, opt$rear_offsets)
+    expect_identical(fit$settings$rear_offsets, opt$rear_offsets)
+    pars <- fit$summary$parameter
+    for (sd in c("sigma_rear_psi", "sigma_rear_p")) {
+      expect_identical(sd %in% pars, opt$rear_offsets == "hierarchical")
+    }
+    expect_true(all(c("rear_psi[1]", "rear_psi[2]",
+                      "rear_p[1]", "rear_p[2]", "sigma_rear_phi") %in% pars))
+    expect_equal(sum(fit$summary$mean[match(c("rear_psi[1]", "rear_psi[2]"), pars)]),
+                 0, tolerance = 1e-10)
+    expect_equal(sum(fit$summary$mean[match(c("rear_p[1]", "rear_p[2]"), pars)]),
+                 0, tolerance = 1e-10)
+    p_means <- fit$summary$mean[grepl("^p\\[", pars)]
+    expect_length(p_means, 8L)
+    expect_true(all(is.finite(p_means)))
+  }
+})
