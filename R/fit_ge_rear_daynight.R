@@ -50,7 +50,13 @@
 #'   "rear_flexible" does for recovery). Rears still share the week-group
 #'   levels, the spill slope, and the sum-to-zero rear offset:
 #'   logit p[r,s] ~ Normal(mu_strat_p[parent[s]] + rear_p[r] + beta_p * z[s],
-#'   sigma_p_rear[r]).
+#'   sigma_p_rear[r]). "rear_strata": each rear has its own week-group levels,
+#'   so a rear's weekly detection pattern follows its own fish instead of the
+#'   pattern set by the rear with more fish. The levels are centered on the
+#'   rear offset and share one SD; the spill slope and the weekly departure SD
+#'   stay shared:
+#'   mu_strat_p_rear[r,g] ~ Normal(alpha_p + rear_p[r], sigma_strat_p),
+#'   logit p[r,s] ~ Normal(mu_strat_p_rear[r,parent[s]] + beta_p * z[s], sigma_p).
 #' @param rear_offsets "hierarchical" (default) estimates SDs for the day GE
 #'   and GRS detection rear offsets. "fixed" gives rear_psi_raw and rear_p_raw
 #'   independent N(0, 2^2) priors with no estimated SD; the day GE (rear_psi)
@@ -78,7 +84,7 @@ fit_ge_rear_daynight <- function(
     delta_sd = 0.5, rear_sd_scale = 1, phi_slope_sd_scale = 0.5,
     night_sd = 2.5, night_week_sd_scale = 1,
     day_ge = c("rear", "shared", "hybrid"), rear_week_sd_scale = 0.5, p_night_offset = 0,
-    p_structure = c("shared", "rear_flexible"),
+    p_structure = c("shared", "rear_flexible", "rear_strata"),
     rear_offsets = c("hierarchical", "fixed"),
     trans_on = NULL, phi_prior = NULL,
     n_iter = 30000, n_adapt = 2000, n_burnin = 10000, n_chains = 3,
@@ -100,6 +106,7 @@ fit_ge_rear_daynight <- function(
   p_structure <- match.arg(p_structure)
   rear_offsets <- match.arg(rear_offsets)
   p_flex <- p_structure == "rear_flexible"
+  p_rs <- p_structure == "rear_strata"
   if (!is.numeric(rear_week_sd_scale) || length(rear_week_sd_scale) != 1L ||
       !is.finite(rear_week_sd_scale) || rear_week_sd_scale <= 0) {
     stop("rear_week_sd_scale must be one positive number.", call. = FALSE)
@@ -322,7 +329,8 @@ fit_ge_rear_daynight <- function(
 ", "    tau_strat_p <- pow(sigma_strat_p, -2)
     for (r in 1:R) {
       for (s in 1:S) {
-        logit_p[r,s] ~ dnorm(mu_strat_p[parent[s]] + rear_p[r] + beta_p * lgr_spill_std[s], ",
+        logit_p[r,s] ~ dnorm(", if (p_rs) "mu_strat_p_rear[r,parent[s]]" else "mu_strat_p[parent[s]] + rear_p[r]",
+  " + beta_p * lgr_spill_std[s], ",
   if (p_flex) "tau_p_rear[r]" else "tau_p", ")
 ", if (joint_detection) "
         q[r,s] <- ilogit(logit_p[r,s])
@@ -335,8 +343,11 @@ fit_ge_rear_daynight <- function(
 ", "
       }
     }
-    for (g in 1:n_strat) { mu_strat_p[g] ~ dnorm(alpha_p, tau_strat_p) }
-    alpha_p ~ dt(0, pow(2, -2), 7)
+", if (p_rs) "    for (r in 1:R) {
+      for (g in 1:n_strat) { mu_strat_p_rear[r,g] ~ dnorm(alpha_p + rear_p[r], tau_strat_p) }
+    }
+" else "    for (g in 1:n_strat) { mu_strat_p[g] ~ dnorm(alpha_p, tau_strat_p) }
+", "    alpha_p ~ dt(0, pow(2, -2), 7)
     beta_p ~ dt(0, pow(1, -2), 7)
 ", if (!p_flex) "    sigma_p ~ dunif(0.05, 3)
 ", "    sigma_strat_p ~ dunif(0.05, 3)
@@ -408,7 +419,7 @@ fit_ge_rear_daynight <- function(
                "p", "p_night", if (day_ge %in% c("shared", "hybrid")) "eta",
                if (day_ge == "hybrid") c("u_rw", "sigma_rw"), "phi_S", "phi_B", "trans", "alpha", "beta", "beta_outflow",
                "sigma_psi", "mu_strat", "sigma_strat", "alpha_p", "beta_p", if (p_flex) "sigma_p_rear" else "sigma_p",
-               "mu_strat_p", "sigma_strat_p", "alpha_phi", "beta_phi", "beta_phi_rear",
+               if (p_rs) "mu_strat_p_rear" else "mu_strat_p", "sigma_strat_p", "alpha_phi", "beta_phi", "beta_phi_rear",
                "sigma_beta_phi_rear", "sigma_phi_rear", "rear_psi", "rear_p",
                if (rear_offsets == "hierarchical") c("sigma_rear_psi", "sigma_rear_p"),
                "rear_phi", "sigma_rear_phi",
@@ -506,3 +517,4 @@ fit_ge_rear_daynight <- function(
   if (verbose) print(period_summary, row.names = FALSE)
   result
 }
+
