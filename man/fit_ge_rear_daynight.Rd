@@ -20,6 +20,7 @@ fit_ge_rear_daynight(
   rear_week_sd_scale = 0.5,
   p_night_offset = 0,
   p_structure = c("shared", "rear_flexible"),
+  rear_offsets = c("hierarchical", "fixed"),
   trans_on = NULL,
   phi_prior = NULL,
   n_iter = 30000,
@@ -99,6 +100,14 @@ to the week pattern set by a rear with many (as phi_structure =
 levels, the spill slope, and the sum-to-zero rear offset:
 logit p[r,s] ~ Normal(mu_strat_p[parent[s]] + rear_p[r] + beta_p * z[s],
 sigma_p_rear[r]).}
+
+\item{rear_offsets}{"hierarchical" (default) estimates SDs for the day GE
+and GRS detection rear offsets. "fixed" gives rear_psi_raw and rear_p_raw
+independent N(0, 2^2) priors with no estimated SD; the day GE (rear_psi)
+and GRS detection (rear_p) offsets are still centered to sum to zero.
+This prevents a hierarchical SD estimated from two rears from shrinking
+the wild minus hatchery difference toward zero. Recovery offsets
+(rear_phi) remain hierarchical.}
 
 \item{trans_on}{Optional R by S 0/1 matrix of known transport availability,
 with rows in `ge_data` rear order and columns in `weeks` order. Zero

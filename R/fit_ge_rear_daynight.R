@@ -51,6 +51,13 @@
 #'   levels, the spill slope, and the sum-to-zero rear offset:
 #'   logit p[r,s] ~ Normal(mu_strat_p[parent[s]] + rear_p[r] + beta_p * z[s],
 #'   sigma_p_rear[r]).
+#' @param rear_offsets "hierarchical" (default) estimates SDs for the day GE
+#'   and GRS detection rear offsets. "fixed" gives rear_psi_raw and rear_p_raw
+#'   independent N(0, 2^2) priors with no estimated SD; the day GE (rear_psi)
+#'   and GRS detection (rear_p) offsets are still centered to sum to zero.
+#'   This prevents a hierarchical SD estimated from two rears from shrinking
+#'   the wild minus hatchery difference toward zero. Recovery offsets
+#'   (rear_phi) remain hierarchical.
 #' @inheritParams fit_ge_rear_model2
 #' @param grs_detection Optional result of [prep_grs_detection()]. Adds a joint
 #'   conditional row-history likelihood. Row detection is pooled across weeks
@@ -72,6 +79,7 @@ fit_ge_rear_daynight <- function(
     night_sd = 2.5, night_week_sd_scale = 1,
     day_ge = c("rear", "shared", "hybrid"), rear_week_sd_scale = 0.5, p_night_offset = 0,
     p_structure = c("shared", "rear_flexible"),
+    rear_offsets = c("hierarchical", "fixed"),
     trans_on = NULL, phi_prior = NULL,
     n_iter = 30000, n_adapt = 2000, n_burnin = 10000, n_chains = 3,
     n_thin = 10, seed = 11, rhat_threshold = 1.01, verbose = TRUE,
@@ -90,6 +98,7 @@ fit_ge_rear_daynight <- function(
   }
   day_ge <- match.arg(day_ge)
   p_structure <- match.arg(p_structure)
+  rear_offsets <- match.arg(rear_offsets)
   p_flex <- p_structure == "rear_flexible"
   if (!is.numeric(rear_week_sd_scale) || length(rear_week_sd_scale) != 1L ||
       !is.finite(rear_week_sd_scale) || rear_week_sd_scale <= 0) {
@@ -259,12 +268,12 @@ fit_ge_rear_daynight <- function(
 ", detection_block, "
 
     # Rear effects (as in fit_ge_rear_model2, full structure)
-    tau_rear_psi <- pow(sigma_rear_psi + 1.0E-6, -2)
+", if (rear_offsets == "hierarchical") "    tau_rear_psi <- pow(sigma_rear_psi + 1.0E-6, -2)
     tau_rear_p <- pow(sigma_rear_p + 1.0E-6, -2)
-    tau_rear_phi <- pow(sigma_rear_phi + 1.0E-6, -2)
+", "    tau_rear_phi <- pow(sigma_rear_phi + 1.0E-6, -2)
     for (r in 1:R) {
-      rear_psi_raw[r] ~ dnorm(0, tau_rear_psi)
-      rear_p_raw[r] ~ dnorm(0, tau_rear_p)
+      rear_psi_raw[r] ~ dnorm(0, ", if (rear_offsets == "fixed") "pow(2, -2)" else "tau_rear_psi", ")
+      rear_p_raw[r] ~ dnorm(0, ", if (rear_offsets == "fixed") "pow(2, -2)" else "tau_rear_p", ")
       rear_phi_raw[r] ~ dnorm(0, tau_rear_phi)
     }
     rear_psi_mean <- mean(rear_psi_raw[])
@@ -275,9 +284,9 @@ fit_ge_rear_daynight <- function(
       rear_p[r] <- rear_p_raw[r] - rear_p_mean
       rear_phi[r] <- rear_phi_raw[r] - rear_phi_mean
     }
-    sigma_rear_psi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+", if (rear_offsets == "hierarchical") "    sigma_rear_psi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
     sigma_rear_p ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
-    sigma_rear_phi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
+", "    sigma_rear_phi ~ dnorm(0, pow(rear_sd_scale, -2)) T(0,)
 
     # Day GE: weekly regression on rear-specific covariates (rear-specific or
     # shared weekly residual). Night GE: day GE plus a weekly night effect.
@@ -401,11 +410,12 @@ fit_ge_rear_daynight <- function(
                "sigma_psi", "mu_strat", "sigma_strat", "alpha_p", "beta_p", if (p_flex) "sigma_p_rear" else "sigma_p",
                "mu_strat_p", "sigma_strat_p", "alpha_phi", "beta_phi", "beta_phi_rear",
                "sigma_beta_phi_rear", "sigma_phi_rear", "rear_psi", "rear_p",
-               "sigma_rear_psi", "sigma_rear_p", "rear_phi", "sigma_rear_phi",
+               if (rear_offsets == "hierarchical") c("sigma_rear_psi", "sigma_rear_p"),
+               "rear_phi", "sigma_rear_phi",
                "delta", "delta0", "sigma_delta", "rear_delta", "sigma_rear_delta")
   if (joint_detection) monitor <- c(monitor, "q", "q_night", "row_detection", "array_detection")
   if (verbose) {
-    message("Day/night eleven-cell fit (day GE ", day_ge, ", p structure ", p_structure, ", p night offset ", p_night_offset,
+    message("Day/night eleven-cell fit (day GE ", day_ge, ", p structure ", p_structure, ", rear offsets ", rear_offsets, ", p night offset ", p_night_offset,
             "): ", R, " rears x ", S, " weeks; ", nrow(lik), " nonempty rear-weeks; ", n_chains, " chains x ", n_iter,
             " post-burn iterations, thin ", n_thin, ".")
   }
@@ -474,7 +484,7 @@ fit_ge_rear_daynight <- function(
     samples = samples, summary = summary, diagnostics = diagnostics,
     psi_summary = psi_summary, period_summary = period_summary,
     rear_levels = rear_levels, target_rear = target_rear, weeks = weeks,
-    day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure,
+    day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure, rear_offsets = rear_offsets,
     joint_grs_detection = joint_detection, q_night_offset = q_night_offset,
     grs_detection = grs_detection,
     parent = parent, n = n, N_seen = N_seen,
@@ -487,7 +497,7 @@ fit_ge_rear_daynight <- function(
     strat_assign = data.frame(Week = weeks, Collapse = seq_len(S)),
     model_string = model_string, jags_data = jd, trans_on = trans_on,
     settings = list(model = "eleven-cell rear-type, day/night split (six cells, c1 to c4 and c6 by period, c5 pooled)",
-                    day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure,
+                    day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure, rear_offsets = rear_offsets,
                     rear_week_sd_scale = if (day_ge == "hybrid") rear_week_sd_scale else NULL,
                     night_sd = night_sd, night_week_sd_scale = night_week_sd_scale,
                     n_iter = n_iter, n_adapt = n_adapt, n_burnin = n_burnin,
