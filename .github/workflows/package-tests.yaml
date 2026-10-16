@@ -1,0 +1,48 @@
+name: Installed package tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installed-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install JAGS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jags
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: |
+            any::testthat
+            any::rjags
+            any::coda
+            any::suncalc
+          needs: check
+      - name: Install package including tests
+        run: R CMD INSTALL --install-tests .
+      - name: Verify installed exported API and JAGS
+        shell: Rscript {0}
+        run: |
+          library(smoltEASE)
+          library(rjags)
+          library(coda)
+          library(suncalc)
+          for (name in c("fit_ge_rear_model2", "fit_ge_rear_daynight")) {
+            args <- formals(getExportedValue("smoltEASE", name))
+            stopifnot(all(c("structure", "delta_prior") %in% names(args)))
+            stopifnot(identical(eval(args$structure), c("original", "consistent")))
+            stopifnot(identical(eval(args$delta_prior), c("tight", "loose")))
+          }
+      - name: Run installed package tests
+        run: Rscript -e 'testthat::test_package("smoltEASE", stop_on_failure = TRUE)'
