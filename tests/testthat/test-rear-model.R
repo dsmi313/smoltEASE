@@ -173,3 +173,53 @@ test_that("new additive fits need no interaction column", {
   expected <- plogis(qlogis(.2) - .5 + .25)
   expect_equal(as.numeric(out[1, -1]), rep(expected, 4))
 })
+
+test_that("six-cell structure = consistent and delta_prior build and fit", {
+  skip_if_not_installed("rjags")
+  skip_if_not_installed("coda")
+  n_H <- rbind(
+    c(22, 3, 30, 2, 1, 0), c(18, 3, 28, 2, 1, 8),
+    c(12, 2, 22, 2, 1, 12), c(15, 2, 25, 2, 1, 0))
+  n_W <- rbind(
+    c(8, 1, 18, 1, 1, 0), c(7, 1, 16, 1, 1, 4),
+    c(5, 1, 13, 1, 1, 6), c(6, 1, 15, 1, 1, 0))
+  make_group <- function(n) {
+    list(n = n, lgr_spill_pct = c(25, 45, 65, 35),
+         lgs_spill_pct = c(20, 40, 60, 30),
+         lgr_outflow = c(70, 85, 100, 80),
+         parent = c(1, 1, 2, 2))
+  }
+  ge_data <- list(H = make_group(n_H), W = make_group(n_W))
+  trans_on <- matrix(c(0, 1, 1, 0, 0, 1, 1, 0), nrow = 2, byrow = TRUE,
+                     dimnames = list(c("H", "W"), as.character(13:16)))
+  expect_error(fit_ge_rear_model2(ge_data, weeks = 13:16, structure = "consistent",
+                                  rear_structure = "reduced", verbose = FALSE),
+               "requires rear_structure")
+  for (dp in c("tight", "loose")) {
+    for (dm in c("free", "fixed")) {
+      fit <- suppressWarnings(fit_ge_rear_model2(
+        ge_data, weeks = 13:16, structure = "consistent", delta_prior = dp, delta_mode = dm,
+        trans_on = trans_on, n_adapt = 100, n_burnin = 100, n_iter = 200,
+        n_chains = 2, n_thin = 2, verbose = FALSE))
+      expect_identical(fit$settings$structure, "consistent")
+      expect_identical(fit$settings$delta_prior, dp)
+      expect_false(grepl("dunif|dt\\(", fit$model_string))
+      pars <- fit$summary$parameter
+      expect_true(all(c("mu_strat_phi[1]", "mu_strat_phi[2]", "beta_phi_rear[1]", "beta_phi_rear[2]",
+                        "sigma_phi", "sigma_strat_phi", "rear_phi[1]") %in% pars))
+      expect_false(any(c("sigma_rear_psi", "sigma_rear_p", "sigma_rear_phi", "beta_phi") %in% pars))
+      expect_identical("rear_delta[1]" %in% pars, dm == "free")
+      if (dm == "free") expect_equal(fit$jags_data$delta0_sd, if (dp == "loose") 2.5 else 0.5)
+      for (nm in c("rear_psi", "rear_p", "rear_phi")) {
+        expect_equal(sum(fit$summary$mean[match(paste0(nm, "[", 1:2, "]"), pars)]), 0, tolerance = 1e-10)
+      }
+      expect_true(all(is.finite(fit$psi_summary$mean)))
+      expect_true(all(is.finite(fit$summary$mean[grepl("^p\\[", pars)])))
+    }
+  }
+  orig <- suppressWarnings(fit_ge_rear_model2(
+    ge_data, weeks = 13:16, delta_prior = "loose", n_adapt = 100, n_burnin = 100, n_iter = 200,
+    n_chains = 2, n_thin = 2, verbose = FALSE))
+  expect_identical(orig$settings$structure, "original")
+  expect_equal(orig$jags_data$delta0_sd, 2.5)
+})

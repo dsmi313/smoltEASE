@@ -21,6 +21,8 @@ fit_ge_rear_daynight(
   p_night_offset = 0,
   p_structure = c("shared", "rear_flexible", "rear_strata"),
   rear_offsets = c("hierarchical", "fixed"),
+  structure = c("original", "consistent"),
+  delta_prior = c("tight", "loose"),
   trans_on = NULL,
   phi_prior = NULL,
   n_iter = 30000,
@@ -115,6 +117,27 @@ This prevents a hierarchical SD estimated from two rears from shrinking
 the wild minus hatchery difference toward zero. Recovery offsets
 (rear_phi) remain hierarchical.}
 
+\item{structure}{"original" (default) keeps the model as in earlier
+versions. "consistent" applies one prior rule per kind of parameter and
+one structure to day GE, GRS detection, and recovery:
+averages and rear offsets (alpha, alpha_p, alpha_phi, night_mu, all rear
+offsets) ~ N(0, 2.5^2) on the logit scale; slopes on standardized
+covariates (beta, beta_outflow, beta_p, and one LGS slope per rear for
+recovery) ~ N(0, 1), with beta and the recovery slopes truncated at zero
+(more spill can only lower them); every SD ~ half-normal(0, 1) with 1e-6
+added in each precision; a and trans ~ Beta(1, 1). Rear offsets for day
+GE, detection, recovery, and the route offset are all fixed (independent
+priors, centered to sum to zero; `rear_offsets` is ignored and recorded
+as "fixed"). Recovery gets the same week groups (`parent`) as day GE and
+detection, around a season average, and one weekly SD shared by rears.
+`phi_prior`, `rear_sd_scale`, `phi_slope_sd_scale`, `night_sd`, and
+`night_week_sd_scale` are not used. Requires `p_structure = "shared"`.}
+
+\item{delta_prior}{Prior for the season-average route offset delta0.
+"tight" (default): N(0, delta_sd^2), as in earlier versions. "loose":
+N(0, 2.5^2), the same rule as other averages. Works with either
+`structure`.}
+
 \item{trans_on}{Optional R by S 0/1 matrix of known transport availability,
 with rows in `ge_data` rear order and columns in `weeks` order. Zero
 fixes transport at zero in that rear-week. If `NULL`, transport is
@@ -171,4 +194,3 @@ be tested with these data; check sensitivity if it matters.
 Likelihood per rear-week: multinomial over 11 cells, day c1 c2 c3 c4 c6,
 night c1 c2 c3 c4 c6, and pooled c5, conditional on being seen.
 }
-
