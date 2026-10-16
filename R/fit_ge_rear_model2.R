@@ -54,6 +54,22 @@
 #' @param phi_prior Optional list containing `alpha_phi_mean`, `alpha_phi_sd`,
 #'   `beta_phi_mean`, and `beta_phi_sd`. Otherwise these are read from the
 #'   target-rear data or use the provisional six-cell defaults.
+#' @param structure "original" (default) keeps the model as in earlier
+#'   versions. "consistent" uses the same prior rules and structure as
+#'   [fit_ge_rear_daynight()] with `structure = "consistent"`: averages and
+#'   rear offsets ~ N(0, 2.5^2) on the logit scale; slopes on standardized
+#'   covariates ~ N(0, 1), with beta and the per-rear LGS recovery slopes
+#'   truncated at zero; every SD ~ half-normal(0, 1) with 1e-6 added in each
+#'   precision; transport ~ Beta(1, 1). Rear offsets for psi, p, phi_S, and
+#'   the route offset are fixed (independent priors, centered to sum to zero).
+#'   Recovery uses the same week groups (`parent`) as psi and p, around a
+#'   season average, with one weekly SD shared by rears and one LGS slope per
+#'   rear. Requires `rear_structure = "full"` and at least two rear groups;
+#'   `phi_structure`, `phi_prior`, `rear_sd_scale`, and `phi_slope_sd_scale`
+#'   are not used.
+#' @param delta_prior Prior for the season-average route offset delta0 when
+#'   `delta_mode = "free"`. "tight" (default): N(0, delta_sd^2), as in earlier
+#'   versions. "loose": N(0, 2.5^2). Works with either `structure`.
 #' @param n_iter,n_adapt,n_burnin,n_chains,n_thin MCMC controls. `n_iter` is
 #'   post-burn sampling iterations per chain before thinning.
 #' @param seed Nonnegative integer used to seed the JAGS chains.
@@ -93,6 +109,8 @@ fit_ge_rear_model2 <- function(
     phi_structure = c("shared", "rear_flexible"),
     delta_mode = c("free", "fixed"),
     delta_sd = 0.5,
+    structure = c("original", "consistent"),
+    delta_prior = c("tight", "loose"),
     rear_sd_scale = 1,
     phi_slope_sd_scale = 0.5,
     trans_on = NULL,
@@ -111,6 +129,13 @@ fit_ge_rear_model2 <- function(
   rear_structure <- match.arg(rear_structure)
   phi_structure <- match.arg(phi_structure)
   delta_mode <- match.arg(delta_mode)
+  structure <- match.arg(structure)
+  delta_prior <- match.arg(delta_prior)
+  consistent <- structure == "consistent"
+  if (consistent && (rear_structure != "full" || length(names(ge_data)) < 2L)) {
+    stop("structure = \"consistent\" requires rear_structure = \"full\" and at least two rear groups.",
+         call. = FALSE)
+  }
   if (phi_structure == "rear_flexible" && rear_structure != "full") {
     stop("phi_structure = 'rear_flexible' requires rear_structure = 'full'.",
          call. = FALSE)
@@ -350,9 +375,9 @@ fit_ge_rear_model2 <- function(
   if (flexible_phi) jd$phi_slope_sd_scale <- phi_slope_sd_scale
 
   delta_block <- if (delta_mode == "free" && full_structure) {
-    jd$delta_sd <- delta_sd
+    jd$delta0_sd <- if (delta_prior == "loose") 2.5 else delta_sd
     "
-    delta0 ~ dnorm(0, pow(delta_sd, -2))
+    delta0 ~ dnorm(0, pow(delta0_sd, -2))
     sigma_delta ~ dunif(0, 3)
     tau_delta <- pow(sigma_delta + 1.0E-6, -2)
     for (r in 1:R) {
@@ -362,9 +387,9 @@ fit_ge_rear_model2 <- function(
     }
     "
   } else if (delta_mode == "free") {
-    jd$delta_sd <- delta_sd
+    jd$delta0_sd <- if (delta_prior == "loose") 2.5 else delta_sd
     "
-    delta0 ~ dnorm(0, pow(delta_sd, -2))
+    delta0 ~ dnorm(0, pow(delta0_sd, -2))
     sigma_delta ~ dunif(0, 3)
     tau_delta <- pow(sigma_delta + 1.0E-6, -2)
     for (s in 1:S) { delta[s] ~ dnorm(delta0, tau_delta) }
@@ -592,6 +617,115 @@ fit_ge_rear_model2 <- function(
     }
   }")
 
+  if (consistent) {
+    jd$loc_sd <- 2.5; jd$slope_sd <- 1; jd$sd_scale <- 1
+    if (delta_mode == "free") jd$delta0_sd <- if (delta_prior == "loose") 2.5 else delta_sd
+    delta_c <- if (delta_mode == "free") "
+    for (r in 1:R) { rear_delta_raw[r] ~ dnorm(0, pow(loc_sd, -2)) }
+    rear_delta_mean <- mean(rear_delta_raw[])
+    for (r in 1:R) { rear_delta[r] <- rear_delta_raw[r] - rear_delta_mean }
+    delta0 ~ dnorm(0, pow(delta0_sd, -2))
+    sigma_delta ~ dnorm(0, pow(sd_scale, -2)) T(0,)
+    tau_delta <- pow(sigma_delta + 1.0E-6, -2)
+    for (r in 1:R) {
+      for (s in 1:S) { delta[r,s] ~ dnorm(delta0 + rear_delta[r], tau_delta) }
+    }" else "
+    for (r in 1:R) { for (s in 1:S) { delta[r,s] <- 0 } }"
+    model_string <- paste0("model {
+    eps <- 1.0E-9
+
+    # Consistent structure. Averages and rear offsets ~ N(0, loc_sd^2); slopes ~ N(0, slope_sd^2);
+    # every SD ~ half-normal(0, sd_scale) with 1e-6 added in each precision.
+
+    # Rear offsets: fixed, centered to sum to zero
+    for (r in 1:R) {
+      rear_psi_raw[r] ~ dnorm(0, pow(loc_sd, -2))
+      rear_p_raw[r] ~ dnorm(0, pow(loc_sd, -2))
+      rear_phi_raw[r] ~ dnorm(0, pow(loc_sd, -2))
+    }
+    rear_psi_mean <- mean(rear_psi_raw[])
+    rear_p_mean <- mean(rear_p_raw[])
+    rear_phi_mean <- mean(rear_phi_raw[])
+    for (r in 1:R) {
+      rear_psi[r] <- rear_psi_raw[r] - rear_psi_mean
+      rear_p[r] <- rear_p_raw[r] - rear_p_mean
+      rear_phi[r] <- rear_phi_raw[r] - rear_phi_mean
+    }
+
+    # GE: weekly regression around week-group averages
+    tau_psi <- pow(sigma_psi + 1.0E-6, -2)
+    tau_strat <- pow(sigma_strat + 1.0E-6, -2)
+    for (r in 1:R) {
+      for (s in 1:S) {
+        logit_psi[r,s] ~ dnorm(
+          mu_strat[parent[s]] + rear_psi[r] +
+          beta * psi_spill_std[r,s] +
+          beta_outflow * psi_outflow_std[r,s],
+          tau_psi)
+        psi[r,s] <- ilogit(logit_psi[r,s])
+      }
+    }
+    for (g in 1:n_strat) { mu_strat[g] ~ dnorm(alpha, tau_strat) }
+    alpha ~ dnorm(0, pow(loc_sd, -2))
+    beta ~ dnorm(0, pow(slope_sd, -2)) T(, 0)
+    beta_outflow ~ dnorm(0, pow(slope_sd, -2))
+    sigma_psi ~ dnorm(0, pow(sd_scale, -2)) T(0,)
+    sigma_strat ~ dnorm(0, pow(sd_scale, -2)) T(0,)
+
+    # GRS detection
+    tau_p <- pow(sigma_p + 1.0E-6, -2)
+    tau_strat_p <- pow(sigma_strat_p + 1.0E-6, -2)
+    for (r in 1:R) {
+      for (s in 1:S) {
+        logit_p[r,s] ~ dnorm(mu_strat_p[parent[s]] + rear_p[r] + beta_p * lgr_spill_std[s], tau_p)
+        p[r,s] <- ilogit(logit_p[r,s])
+      }
+    }
+    for (g in 1:n_strat) { mu_strat_p[g] ~ dnorm(alpha_p, tau_strat_p) }
+    alpha_p ~ dnorm(0, pow(loc_sd, -2))
+    beta_p ~ dnorm(0, pow(slope_sd, -2))
+    sigma_p ~ dnorm(0, pow(sd_scale, -2)) T(0,)
+    sigma_strat_p ~ dnorm(0, pow(sd_scale, -2)) T(0,)
+
+    # Recovery: week-group averages, rear offset, one LGS slope per rear, shared weekly SD
+    tau_phi <- pow(sigma_phi + 1.0E-6, -2)
+    tau_strat_phi <- pow(sigma_strat_phi + 1.0E-6, -2)
+    for (g in 1:n_strat) { mu_strat_phi[g] ~ dnorm(alpha_phi, tau_strat_phi) }
+    for (r in 1:R) {
+      beta_phi_rear[r] ~ dnorm(0, pow(slope_sd, -2)) T(, 0)
+      for (s in 1:S) {
+        logit_phi_S[r,s] ~ dnorm(mu_strat_phi[parent[s]] + rear_phi[r] + beta_phi_rear[r] * lgs_spill_std[s],
+                                 tau_phi)
+        phi_S[r,s] <- ilogit(logit_phi_S[r,s])
+        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])
+      }
+    }
+    alpha_phi ~ dnorm(0, pow(loc_sd, -2))
+    sigma_phi ~ dnorm(0, pow(sd_scale, -2)) T(0,)
+    sigma_strat_phi ~ dnorm(0, pow(sd_scale, -2)) T(0,)
+
+    # Route offset
+    ", delta_c, "
+
+    # Transport and the six-cell likelihood
+    for (r in 1:R) {
+      for (s in 1:S) {
+        ", transport_block, "
+        ", observation_block, "
+        pi_raw[r,s,6] <- psi[r,s] * trans[r,s] + eps
+        p_seen[r,s] <- sum(pi_raw[r,s,1:6])
+        for (cc in 1:6) { pi_obs[r,s,cc] <- pi_raw[r,s,cc] / p_seen[r,s] }
+      }
+    }
+    for (j in 1:N_lik) {
+      n[lik_r[j],lik_s[j],1:6] ~ dmulti(
+        pi_obs[lik_r[j],lik_s[j],1:6], N_seen[lik_r[j],lik_s[j]])
+    }
+  }")
+    used <- vapply(names(jd), function(v) grepl(paste0("\\b", v, "\\b"), model_string, perl = TRUE), logical(1))
+    jd <- jd[used]
+  }
+
   for (pkg in c("rjags", "coda")) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
       stop("Install R package '", pkg,
@@ -608,14 +742,20 @@ fit_ge_rear_model2 <- function(
     if (flexible_phi) c("beta_phi_rear", "sigma_beta_phi_rear",
                         "sigma_phi_rear") else "sigma_phi"
   )
-  if (R > 1L) {
+  if (consistent) {
+    monitor <- c("psi", "p", "phi_S", "phi_B", "trans", "pi_obs", "alpha", "beta", "sigma_psi", "mu_strat",
+                 "beta_outflow", "sigma_strat", "alpha_p", "beta_p", "sigma_p", "mu_strat_p", "sigma_strat_p",
+                 "alpha_phi", "mu_strat_phi", "sigma_strat_phi", "beta_phi_rear", "sigma_phi",
+                 "rear_psi", "rear_p", "rear_phi",
+                 if (delta_mode == "free") c("delta", "delta0", "sigma_delta", "rear_delta"))
+  } else if (R > 1L) {
     monitor <- c(monitor, "rear_psi", "rear_p",
                  "sigma_rear_psi", "sigma_rear_p")
     if (full_structure) {
       monitor <- c(monitor, "rear_phi", "sigma_rear_phi")
     }
   }
-  if (delta_mode == "free") {
+  if (!consistent && delta_mode == "free") {
     monitor <- c(monitor, "delta", "delta0", "sigma_delta")
     if (R > 1L && full_structure) {
       monitor <- c(monitor, "rear_delta", "sigma_rear_delta")
@@ -629,6 +769,7 @@ fit_ge_rear_model2 <- function(
     message("Target rear: ", target_rear,
             "; rear structure: ", rear_structure,
             "; phi structure: ", phi_structure,
+            "; structure: ", structure, "; delta prior: ", delta_prior,
             "; phi-prior source: ", prior_source, ".")
   }
 
@@ -746,6 +887,7 @@ fit_ge_rear_model2 <- function(
       phi_slope_sd_scale = phi_slope_sd_scale,
       scheduled_transport = !is.null(trans_on),
       delta_mode = delta_mode, delta_sd = delta_sd,
+      structure = structure, delta_prior = delta_prior,
       rear_sd_scale = rear_sd_scale, phi_prior_source = prior_source,
       psi_covariates = c("percent spill", "outflow"),
       rear_specific_psi_covariates = rear_psi_covariates,

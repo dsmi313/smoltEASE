@@ -312,3 +312,68 @@ test_that("rear_offsets controls offset SDs across day/night model options", {
   }
 })
 
+
+test_that("structure = consistent and delta_prior build and fit", {
+  skip_if_not_installed("rjags")
+  skip_if_not_installed("coda")
+  make_group <- function() {
+    day <- rbind(c(8, 2, 12, 2, 0, 0), c(7, 2, 10, 2, 0, 3),
+                 c(6, 1, 8, 1, 0, 4), c(7, 1, 10, 1, 0, 0))
+    night <- day
+    night[, 1] <- night[, 1] + 2L
+    c5 <- rep(2L, 4)
+    n <- day + night
+    n[, 5] <- c5
+    list(base = list(n = n, weeks = 13:16, parent = c(1, 1, 2, 2),
+                     lgr_spill_pct = c(25, 45, 65, 35),
+                     lgs_spill_pct = c(20, 40, 60, 30),
+                     lgr_outflow = c(70, 85, 100, 80),
+                     alpha_phi_mean = 0, alpha_phi_sd = 2,
+                     beta_phi_mean = 0, beta_phi_sd = 1),
+         n_day = day, n_night = night, n_c5 = c5)
+  }
+  dn <- list(H = make_group(), W = make_group())
+  expect_error(fit_ge_rear_daynight(dn, structure = "consistent", p_structure = "rear_flexible",
+                                    verbose = FALSE), "requires p_structure")
+  counts <- array(0L, c(2L, 4L, 2L, 7L))
+  for (r in 1:2) {
+    for (t in 1:2) {
+      period <- if (t == 1L) dn[[r]]$n_day else dn[[r]]$n_night
+      counts[r, , t, 1:6] <- 1L
+      counts[r, , t, 7] <- rowSums(period[, 3:4]) - 6L
+    }
+  }
+  grs <- list(counts = counts, rear_levels = names(dn), weeks = 13:16)
+  options <- expand.grid(day_ge = c("rear", "shared", "hybrid"),
+                         delta_prior = c("tight", "loose"),
+                         joint_detection = c(FALSE, TRUE), stringsAsFactors = FALSE)
+  for (i in seq_len(nrow(options))) {
+    opt <- options[i, ]
+    fit <- suppressWarnings(fit_ge_rear_daynight(
+      dn, structure = "consistent", delta_prior = opt$delta_prior, day_ge = opt$day_ge,
+      grs_detection = if (opt$joint_detection) grs else NULL,
+      n_adapt = 100, n_burnin = 100, n_iter = 200, n_chains = 2, n_thin = 2, verbose = FALSE))
+    expect_identical(fit$structure, "consistent")
+    expect_identical(fit$settings$delta_prior, opt$delta_prior)
+    expect_identical(fit$rear_offsets, "fixed")
+    expect_false(grepl("dunif|dt\\(", fit$model_string))
+    expect_equal(fit$jags_data$delta0_sd, if (opt$delta_prior == "loose") 2.5 else 0.5)
+    pars <- fit$summary$parameter
+    expect_true(all(c("mu_strat_phi[1]", "mu_strat_phi[2]", "beta_phi_rear[1]", "beta_phi_rear[2]",
+                      "sigma_phi", "sigma_strat_phi", "rear_delta[1]") %in% pars))
+    expect_false(any(c("sigma_rear_phi", "sigma_rear_delta", "beta_phi", "sigma_beta_phi_rear") %in% pars))
+    for (nm in c("rear_psi", "rear_p", "rear_phi", "rear_delta")) {
+      expect_equal(sum(fit$summary$mean[match(paste0(nm, "[", 1:2, "]"), pars)]), 0, tolerance = 1e-10)
+    }
+    expect_true(all(fit$summary$mean[grepl("^beta_phi_rear\\[", pars)] <= 0))
+    expect_true(all(is.finite(fit$summary$mean[grepl("^psi\\[", pars)])))
+    expect_true(all(is.finite(fit$summary$mean[grepl("^p\\[", pars)])))
+    expect_identical("q[1,1]" %in% pars, opt$joint_detection)
+  }
+  orig <- suppressWarnings(fit_ge_rear_daynight(
+    dn, delta_prior = "loose", n_adapt = 100, n_burnin = 100, n_iter = 200, n_chains = 2, n_thin = 2,
+    verbose = FALSE))
+  expect_identical(orig$structure, "original")
+  expect_equal(orig$jags_data$delta0_sd, 2.5)
+  expect_true(grepl("pow(delta0_sd, -2)", orig$model_string, fixed = TRUE))
+})

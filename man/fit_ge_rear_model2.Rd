@@ -14,6 +14,8 @@ fit_ge_rear_model2(
   phi_structure = c("shared", "rear_flexible"),
   delta_mode = c("free", "fixed"),
   delta_sd = 0.5,
+  structure = c("original", "consistent"),
+  delta_prior = c("tight", "loose"),
   rear_sd_scale = 1,
   phi_slope_sd_scale = 0.5,
   trans_on = NULL,
@@ -64,6 +66,24 @@ existing model.}
 \item{delta_mode}{Estimate (`"free"`) or fix (`"fixed"`) the route offset.}
 
 \item{delta_sd}{Prior SD for the mean route offset when estimated.}
+
+\item{structure}{"original" (default) keeps the model as in earlier
+versions. "consistent" uses the same prior rules and structure as
+\code{\link[=fit_ge_rear_daynight]{fit_ge_rear_daynight()}} with `structure = "consistent"`: averages and
+rear offsets ~ N(0, 2.5^2) on the logit scale; slopes on standardized
+covariates ~ N(0, 1), with beta and the per-rear LGS recovery slopes
+truncated at zero; every SD ~ half-normal(0, 1) with 1e-6 added in each
+precision; transport ~ Beta(1, 1). Rear offsets for psi, p, phi_S, and
+the route offset are fixed (independent priors, centered to sum to zero).
+Recovery uses the same week groups (`parent`) as psi and p, around a
+season average, with one weekly SD shared by rears and one LGS slope per
+rear. Requires `rear_structure = "full"` and at least two rear groups;
+`phi_structure`, `phi_prior`, `rear_sd_scale`, and `phi_slope_sd_scale`
+are not used.}
+
+\item{delta_prior}{Prior for the season-average route offset delta0 when
+`delta_mode = "free"`. "tight" (default): N(0, delta_sd^2), as in earlier
+versions. "loose": N(0, 2.5^2). Works with either `structure`.}
 
 \item{rear_sd_scale}{Half-normal prior scale for the among-rear SDs on the
 logit scales for psi, p, phi_S, and the route offset. Default 1.}
