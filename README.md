@@ -118,6 +118,27 @@ must match `weeks`. The
 `U` level is an observed unknown-rear classification, not a latent
 hatchery/wild mixture.
 
+## Checking a day/night fit
+
+`ppc_daynight()` runs a posterior predictive check on a saved
+`fit_ge_rear_daynight()` result, from its posterior draws (no refit):
+
+```r
+fit <- readRDS("fit_MY2023_daynight_rear_decay0.50_raw.rds")
+ppc <- ppc_daynight(fit)
+ppc        # overall p, day vs night proportions, flagged rear-weeks, cell totals
+plot(ppc)
+```
+
+The day/night model has close to one free parameter per cell in each
+rear-week, so the overall Freeman-Tukey p-value has little power. The
+`day_night` table is the informative part: it tests the proportions the
+model holds equal by day and night (transport, bypass recovery, and spill
+recovery). If spill recovery fails, refit with `phi_night = "shared"` or
+`"rear"`, which estimates a logit offset for night spill recovery, and
+compare wild GE and expanded passage with the default fit. The default,
+`phi_night = "none"`, leaves the model unchanged.
+
 ## Relationship to other tools
 
 - `SCOBI::SCRAPI`: the legacy estimator. `smoltEASE` reads the same inputs and reduces to comparable results when GE and GSI uncertainty are switched off.

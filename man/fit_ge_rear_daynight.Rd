@@ -19,6 +19,8 @@ fit_ge_rear_daynight(
   day_ge = c("rear", "shared", "hybrid"),
   rear_week_sd_scale = 0.5,
   p_night_offset = 0,
+  phi_night = c("none", "shared", "rear"),
+  phi_night_sd = 1,
   p_structure = c("shared", "rear_flexible", "rear_strata"),
   rear_offsets = c("hierarchical", "fixed"),
   structure = c("original", "consistent"),
@@ -93,6 +95,20 @@ day_ge = "hybrid".}
 \item{p_night_offset}{Fixed logit-scale offset for GRS detection of
 night-passing spilled fish: logit p_night = logit p + p_night_offset.
 0 (default) is the common-p model; nonzero values are for sensitivity.}
+
+\item{phi_night}{Night spill recovery. "none" (default): night-passing
+nonguided fish have the same recovery as day fish, phi_S, and the model
+is unchanged from earlier versions. "shared": an estimated logit offset,
+logit phi_S_night[r,s] = logit phi_S[r,s] + phi_night_eff, with one
+offset for all rears. "rear": one offset per rear, phi_night_eff[r].
+Unlike `p_night_offset`, the offset is estimated: day and night spilled
+fish read at GRS (cells c3 and c4) show recovery by period directly. It
+applies to the night spilled cells and the night part of pooled c5.
+Bypass recovery (phi_B) and transport stay common to day and night.
+Use [ppc_daynight()] to see whether the data call for it.}
+
+\item{phi_night_sd}{Prior SD of the night spill recovery offset(s), logit
+scale, centered on zero. Used only when `phi_night` is not "none".}
 
 \item{p_structure}{"shared" (default): the weekly GRS detection departures
 share one SD across rears, sigma_p. "rear_flexible": each rear has its own
@@ -185,7 +201,8 @@ for all fish is psi[r,s] = (1 - a) psi_day + a psi_night.
 }
 \details{
 Downstream recovery, the route offset, and transport are the same for day
-and night fish within a rear-week, and so is GRS detection (p) unless
+and night fish within a rear-week (spill recovery can differ when
+`phi_night` is set), and so is GRS detection (p) unless
 `p_night_offset` is set. Because p is common by default,
 GOJ-only fish (cell 5), which have no LGR time, enter as one pooled cell
 whose probability sums over day and night. This common-p assumption cannot

@@ -10,7 +10,8 @@
 #' for all fish is psi[r,s] = (1 - a) psi_day + a psi_night.
 #'
 #' Downstream recovery, the route offset, and transport are the same for day
-#' and night fish within a rear-week, and so is GRS detection (p) unless
+#' and night fish within a rear-week (spill recovery can differ when
+#' `phi_night` is set), and so is GRS detection (p) unless
 #' `p_night_offset` is set. Because p is common by default,
 #' GOJ-only fish (cell 5), which have no LGR time, enter as one pooled cell
 #' whose probability sums over day and night. This common-p assumption cannot
@@ -43,6 +44,18 @@
 #' @param p_night_offset Fixed logit-scale offset for GRS detection of
 #'   night-passing spilled fish: logit p_night = logit p + p_night_offset.
 #'   0 (default) is the common-p model; nonzero values are for sensitivity.
+#' @param phi_night Night spill recovery. "none" (default): night-passing
+#'   nonguided fish have the same recovery as day fish, phi_S, and the model
+#'   is unchanged from earlier versions. "shared": an estimated logit offset,
+#'   logit phi_S_night[r,s] = logit phi_S[r,s] + phi_night_eff, with one
+#'   offset for all rears. "rear": one offset per rear, phi_night_eff[r].
+#'   Unlike `p_night_offset`, the offset is estimated: day and night spilled
+#'   fish read at GRS (cells c3 and c4) show recovery by period directly. It
+#'   applies to the night spilled cells and the night part of pooled c5.
+#'   Bypass recovery (phi_B) and transport stay common to day and night.
+#'   Use [ppc_daynight()] to see whether the data call for it.
+#' @param phi_night_sd Prior SD of the night spill recovery offset(s), logit
+#'   scale, centered on zero. Used only when `phi_night` is not "none".
 #' @param p_structure "shared" (default): the weekly GRS detection departures
 #'   share one SD across rears, sigma_p. "rear_flexible": each rear has its own
 #'   SD, sigma_p_rear[r] ~ Uniform(0.05, 3), so a rear with few fish is not held
@@ -103,6 +116,7 @@ fit_ge_rear_daynight <- function(
     delta_sd = 0.5, rear_sd_scale = 1, phi_slope_sd_scale = 0.5,
     night_sd = 2.5, night_week_sd_scale = 1,
     day_ge = c("rear", "shared", "hybrid"), rear_week_sd_scale = 0.5, p_night_offset = 0,
+    phi_night = c("none", "shared", "rear"), phi_night_sd = 1,
     p_structure = c("shared", "rear_flexible", "rear_strata"),
     rear_offsets = c("hierarchical", "fixed"),
     structure = c("original", "consistent"), delta_prior = c("tight", "loose"),
@@ -140,6 +154,10 @@ fit_ge_rear_daynight <- function(
   }
   if (!is.numeric(p_night_offset) || length(p_night_offset) != 1L || !is.finite(p_night_offset)) {
     stop("p_night_offset must be one finite number.", call. = FALSE)
+  }
+  phi_night <- match.arg(phi_night)
+  if (!is.numeric(phi_night_sd) || length(phi_night_sd) != 1L || !is.finite(phi_night_sd) || phi_night_sd <= 0) {
+    stop("phi_night_sd must be one positive number.", call. = FALSE)
   }
   if (n_iter %% n_thin != 0L) stop("n_iter must be divisible by n_thin.", call. = FALSE)
   target <- ge_dn[[target_rear]]$base
@@ -269,6 +287,23 @@ fit_ge_rear_daynight <- function(
         trans[r,s] <- trans_on[r,s] * trans_free[r,s]"
   }
 
+  # Night spill recovery: the same as day ("none"), or day plus an estimated
+  # logit offset shared by rears ("shared") or one per rear ("rear"). With
+  # "none" the model text is unchanged from earlier versions.
+  phi_SN <- if (phi_night == "none") "phi_S" else "phi_S_night"
+  phi_night_def <- if (phi_night == "none") "" else "
+        phi_S_night[r,s] <- ilogit(logit_phi_S[r,s] + phi_night_eff[r])"
+  phi_night_prior <- switch(phi_night, none = "", shared = "
+    phi_night_eff0 ~ dnorm(0, pow(phi_night_sd, -2))
+    for (r in 1:R) { phi_night_eff[r] <- phi_night_eff0 }
+", rear = "
+    for (r in 1:R) { phi_night_eff[r] ~ dnorm(0, pow(phi_night_sd, -2)) }
+")
+  c5_line <- if (phi_night == "none") "        pi_raw[r,s,11] <- ((1-a[r,s]) * (1-psi_day[r,s]) * (1-p[r,s]) +
+                           a[r,s] * (1-psi_night[r,s]) * (1-p_night[r,s])) * phi_S[r,s] + eps" else "        pi_raw[r,s,11] <- (1-a[r,s]) * (1-psi_day[r,s]) * (1-p[r,s]) * phi_S[r,s] +
+                           a[r,s] * (1-psi_night[r,s]) * (1-p_night[r,s]) * phi_S_night[r,s] + eps"
+  if (phi_night != "none") jd$phi_night_sd <- phi_night_sd
+
   day_block <- if (day_ge == "rear") {
     "logit_psi[r,s] ~ dnorm(
           mu_strat[parent[s]] + rear_psi[r] +
@@ -301,7 +336,7 @@ fit_ge_rear_daynight <- function(
 
   model_string <- paste0("model {
     eps <- 1.0E-9
-", detection_block, "
+", detection_block, phi_night_prior, "
 
     # Rear effects (as in fit_ge_rear_model2, full structure)
 ", if (rear_offsets == "hierarchical") "    tau_rear_psi <- pow(sigma_rear_psi + 1.0E-6, -2)
@@ -395,7 +430,7 @@ fit_ge_rear_daynight <- function(
         logit_phi_S[r,s] ~ dnorm(alpha_phi + rear_phi[r] + beta_phi_rear[r] * lgs_spill_std[s],
                                  tau_phi_rear[r])
         phi_S[r,s] <- ilogit(logit_phi_S[r,s])
-        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])
+        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])", phi_night_def, "
       }
     }
     alpha_phi ~ dnorm(alpha_phi_mean, pow(alpha_phi_sd, -2))
@@ -427,11 +462,10 @@ fit_ge_rear_daynight <- function(
         pi_raw[r,s,5] <- (1-a[r,s]) * psi_day[r,s] * trans[r,s] + eps
         pi_raw[r,s,6] <- a[r,s] * psi_night[r,s] * (1-trans[r,s]) * (1-phi_B[r,s]) + eps
         pi_raw[r,s,7] <- a[r,s] * psi_night[r,s] * (1-trans[r,s]) * phi_B[r,s] + eps
-        pi_raw[r,s,8] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * (1-phi_S[r,s]) + eps
-        pi_raw[r,s,9] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * phi_S[r,s] + eps
+        pi_raw[r,s,8] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * (1-", phi_SN, "[r,s]) + eps
+        pi_raw[r,s,9] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * ", phi_SN, "[r,s] + eps
         pi_raw[r,s,10] <- a[r,s] * psi_night[r,s] * trans[r,s] + eps
-        pi_raw[r,s,11] <- ((1-a[r,s]) * (1-psi_day[r,s]) * (1-p[r,s]) +
-                           a[r,s] * (1-psi_night[r,s]) * (1-p_night[r,s])) * phi_S[r,s] + eps
+", c5_line, "
         p_seen[r,s] <- sum(pi_raw[r,s,1:11])
         for (cc in 1:11) { pi_obs[r,s,cc] <- pi_raw[r,s,cc] / p_seen[r,s] }
       }
@@ -452,7 +486,7 @@ fit_ge_rear_daynight <- function(
         p_night[r,s] <- ilogit(logit_p[r,s] + p_night_offset)"
     model_string <- paste0("model {
     eps <- 1.0E-9
-", detection_block, "
+", detection_block, phi_night_prior, "
 
     # Consistent structure. Averages and rear offsets ~ N(0, loc_sd^2); slopes ~ N(0, slope_sd^2);
     # every SD ~ half-normal(0, sd_scale) with 1e-6 added in each precision.
@@ -523,7 +557,7 @@ fit_ge_rear_daynight <- function(
         logit_phi_S[r,s] ~ dnorm(mu_strat_phi[parent[s]] + rear_phi[r] + beta_phi_rear[r] * lgs_spill_std[s],
                                  tau_phi)
         phi_S[r,s] <- ilogit(logit_phi_S[r,s])
-        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])
+        phi_B[r,s] <- ilogit(logit_phi_S[r,s] - delta[r,s])", phi_night_def, "
       }
     }
     alpha_phi ~ dnorm(0, pow(loc_sd, -2))
@@ -549,11 +583,10 @@ fit_ge_rear_daynight <- function(
         pi_raw[r,s,5] <- (1-a[r,s]) * psi_day[r,s] * trans[r,s] + eps
         pi_raw[r,s,6] <- a[r,s] * psi_night[r,s] * (1-trans[r,s]) * (1-phi_B[r,s]) + eps
         pi_raw[r,s,7] <- a[r,s] * psi_night[r,s] * (1-trans[r,s]) * phi_B[r,s] + eps
-        pi_raw[r,s,8] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * (1-phi_S[r,s]) + eps
-        pi_raw[r,s,9] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * phi_S[r,s] + eps
+        pi_raw[r,s,8] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * (1-", phi_SN, "[r,s]) + eps
+        pi_raw[r,s,9] <- a[r,s] * (1-psi_night[r,s]) * p_night[r,s] * ", phi_SN, "[r,s] + eps
         pi_raw[r,s,10] <- a[r,s] * psi_night[r,s] * trans[r,s] + eps
-        pi_raw[r,s,11] <- ((1-a[r,s]) * (1-psi_day[r,s]) * (1-p[r,s]) +
-                           a[r,s] * (1-psi_night[r,s]) * (1-p_night[r,s])) * phi_S[r,s] + eps
+", c5_line, "
         p_seen[r,s] <- sum(pi_raw[r,s,1:11])
         for (cc in 1:11) { pi_obs[r,s,cc] <- pi_raw[r,s,cc] / p_seen[r,s] }
       }
@@ -584,8 +617,10 @@ fit_ge_rear_daynight <- function(
                "rear_phi", "sigma_rear_phi",
                "delta", "delta0", "sigma_delta", "rear_delta", "sigma_rear_delta")
   if (joint_detection) monitor <- c(monitor, "q", "q_night", "row_detection", "array_detection")
+  if (phi_night != "none") monitor <- c(monitor, "phi_S_night", "phi_night_eff")
   if (verbose) {
     message("Day/night eleven-cell fit (", structure, " structure, delta prior ", delta_prior, ", day GE ", day_ge, ", p structure ", p_structure, ", rear offsets ", rear_offsets, ", p night offset ", p_night_offset,
+            if (phi_night != "none") paste0(", night spill recovery offset ", phi_night),
             "): ", R, " rears x ", S, " weeks; ", nrow(lik), " nonempty rear-weeks; ", n_chains, " chains x ", n_iter,
             " post-burn iterations, thin ", n_thin, ".")
   }
@@ -619,6 +654,7 @@ fit_ge_rear_daynight <- function(
                        "^(alpha|beta|beta_outflow|sigma_psi|sigma_night|sigma_rear_psi|sigma_rear_p|sigma_rw)$"),
                 summary$parameter)
   if (joint_detection) core <- core | grepl("^(p_night|q|q_night|row_detection|array_detection)\\[", summary$parameter)
+  if (phi_night != "none") core <- core | grepl("^phi_night_eff\\[", summary$parameter)
   diagnostics <- list(threshold = rhat_threshold, all_rhat_pass = !any(bad),
                       core_ge_rhat_pass = !any(bad & core),
                       flagged_core_ge_parameters = summary[bad & core, , drop = FALSE])
@@ -655,7 +691,7 @@ fit_ge_rear_daynight <- function(
     psi_summary = psi_summary, period_summary = period_summary,
     rear_levels = rear_levels, target_rear = target_rear, weeks = weeks,
     day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure, rear_offsets = rear_offsets,
-    structure = structure, delta_prior = delta_prior,
+    structure = structure, delta_prior = delta_prior, phi_night = phi_night, phi_night_sd = phi_night_sd,
     joint_grs_detection = joint_detection, q_night_offset = q_night_offset,
     grs_detection = grs_detection,
     parent = parent, n = n, N_seen = N_seen,
@@ -669,7 +705,7 @@ fit_ge_rear_daynight <- function(
     model_string = model_string, jags_data = jd, trans_on = trans_on,
     settings = list(model = "eleven-cell rear-type, day/night split (six cells, c1 to c4 and c6 by period, c5 pooled)",
                     day_ge = day_ge, p_night_offset = p_night_offset, p_structure = p_structure, rear_offsets = rear_offsets,
-                    structure = structure, delta_prior = delta_prior,
+                    structure = structure, delta_prior = delta_prior, phi_night = phi_night, phi_night_sd = phi_night_sd,
                     rear_week_sd_scale = if (day_ge == "hybrid") rear_week_sd_scale else NULL,
                     night_sd = night_sd, night_week_sd_scale = night_week_sd_scale,
                     n_iter = n_iter, n_adapt = n_adapt, n_burnin = n_burnin,
